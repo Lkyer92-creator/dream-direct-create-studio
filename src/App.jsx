@@ -7,119 +7,83 @@ import {
   Layers, Users, AudioLines, Palette,
 } from 'lucide-react';
 
-/* ============================== FAL.AI CONFIG ============================== */
-// Whisper: timestamped transcription (chunk_level=segment) so lyrics map onto scenes.
-// NOTE: the fal.ai key is typed into the app by the user and lives ONLY in this
-// browser's localStorage. It is never committed to the repo or sent anywhere but fal.ai.
-const FAL_WHISPER = 'fal-ai/whisper';
-const FAL_STORAGE_INITIATE = 'https://rest.alpha.fal.ai/storage/upload/initiate';
+/* ============================== FREE TRANSCRIPTION ============================== */
+// Lyric transcription runs free in Google Colab (open-source Whisper on a free GPU).
+// The notebook lives in this repo; this link opens it directly in Colab.
+const COLAB_TRANSCRIBE_URL = 'https://colab.research.google.com/github/Lkyer92-creator/dream-direct-create-studio/blob/main/song-transcriber.ipynb';
 
 const FFMPEG_CORE_VERSION = '0.12.6';
 const FFMPEG_CORE_URL = `https://cdn.jsdelivr.net/npm/@ffmpeg/core@${FFMPEG_CORE_VERSION}/dist/esm/ffmpeg-core.js`;
 const FFMPEG_WASM_URL = `https://cdn.jsdelivr.net/npm/@ffmpeg/core@${FFMPEG_CORE_VERSION}/dist/esm/ffmpeg-core.wasm`;
 
-const LS_KEY = 'ddc_studio_fal_key';
 const LS_PROJECT = 'ddc_studio_project_v1';
 const LS_INDEX = 'ddc_projects_v1';
 const LS_PROJECT_PREFIX = 'ddc_project_';
 const LS_CHARACTERS = 'ddc_characters_v1';
 const LS_LOOKS = 'ddc_looks_v1';
 
-/* ============================== FAL.AI HELPERS ============================== */
-async function falPost(endpoint, key, body) {
-  const url = endpoint.startsWith('http') ? endpoint : `https://fal.run/${endpoint}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Authorization': `Key ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  let data = null;
-  try { data = await res.json(); } catch (e) { /* non-JSON */ }
-  if (!res.ok) {
-    const detail = data?.detail || data?.error || `HTTP ${res.status}`;
-    throw new Error(`fal.ai error: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+/* ============================== ON-DEVICE TRANSCRIPTION (free) ============================== */
+// Whisper runs IN this browser via transformers.js — no API key, no server, no cost.
+// First run downloads the tiny model once (~40MB, then cached). On a phone a full song
+// takes several minutes; the free Colab notebook is the faster alternative.
+const TRANSFORMERS_CDN = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+let _transcriberPromise = null;
+function getTranscriber(onStatus) {
+  if (!_transcriberPromise) {
+    _transcriberPromise = (async () => {
+      if (onStatus) onStatus('Downloading speech model (one-time, ~40MB)…');
+      const { pipeline } = await import(/* @vite-ignore */ TRANSFORMERS_CDN);
+      return pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en');
+    })().catch((e) => { _transcriberPromise = null; throw e; });
   }
-  return data || {};
+  return _transcriberPromise;
 }
 
-async function falGet(url, key) {
-  const res = await fetch(url, { headers: { 'Authorization': `Key ${key}` } });
-  let data = null;
-  try { data = await res.json(); } catch (e) { /* non-JSON */ }
-  if (!res.ok) {
-    const detail = data?.detail || data?.error || `HTTP ${res.status}`;
-    throw new Error(`fal.ai error: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
-  }
-  return data || {};
-}
-
-async function pollFalQueue(statusUrl, responseUrl, key, { intervalMs, maxPolls, onTick, isCancelled }) {
-  for (let i = 0; i < maxPolls; i++) {
-    if (isCancelled && isCancelled()) return { cancelled: true };
-    await new Promise((r) => setTimeout(r, intervalMs));
-    if (isCancelled && isCancelled()) return { cancelled: true };
-    const s = await falGet(statusUrl, key);
-    if (onTick) onTick(s, i);
-    if (s.status === 'COMPLETED') {
-      let result = s;
-      if (responseUrl && !s.video && !s.text) {
-        try { result = await falGet(responseUrl, key); } catch (e) { /* keep status payload */ }
-      }
-      return { completed: true, data: result };
-    }
-    if (s.status === 'FAILED') throw new Error('fal.ai failed this job. Try tweaking the prompt or input and run it again.');
-  }
-  throw new Error('Timed out waiting on fal.ai — check your fal.ai dashboard, the job may still finish there.');
-}
-
-// Real audio -> timestamped lyrics via fal-ai/whisper.
-// Flow: initiate fal storage upload -> browser PUTs bytes direct -> submit whisper -> poll.
-async function whisperTranscribe(key, file, onStatus, isCancelled) {
-  if (!file) throw new Error('No audio file to transcribe.');
-  if (file.size > 100 * 1024 * 1024) throw new Error('That file is over 100MB — try a smaller MP3.');
-  if (onStatus) onStatus('Starting upload to fal.ai…');
-  const init = await falPost(FAL_STORAGE_INITIATE, key, {
-    file_name: file.name || 'audio.mp3',
-    content_type: file.type || 'audio/mpeg',
-  });
-  if (!init.upload_url || !init.file_url) throw new Error('fal.ai storage did not return an upload URL.');
-  if (onStatus) onStatus('Uploading audio…');
-  let putRes;
+async function decodeTo16kMono(file) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) throw new Error('This browser cannot decode audio. Try Chrome on your phone.');
+  const ctx = new AC();
   try {
-    putRes = await fetch(init.upload_url, {
-      method: 'PUT',
-      headers: { 'Content-Type': file.type || 'audio/mpeg' },
-      body: file,
-    });
+    const buf = await file.arrayBuffer();
+    const audioBuffer = await ctx.decodeAudioData(buf);
+    const targetRate = 16000;
+    const offline = new OfflineAudioContext(1, Math.max(1, Math.ceil(audioBuffer.duration * targetRate)), targetRate);
+    const src = offline.createBufferSource();
+    src.buffer = audioBuffer;
+    src.connect(offline.destination);
+    src.start(0);
+    const rendered = await offline.startRendering();
+    return rendered.getChannelData(0);
   } catch (e) {
-    throw new Error('Upload to fal.ai was interrupted. Check your connection and try again.');
+    throw new Error('Could not read that audio file. Try an MP3 or WAV.');
+  } finally {
+    try { ctx.close(); } catch (e) { /* ignore */ }
   }
-  if (!putRes.ok) throw new Error('Audio upload to fal.ai failed. Try again.');
-  if (onStatus) onStatus('Transcribing with Whisper… (a full song takes a few minutes)');
-  const sub = await falPost(FAL_WHISPER, key, {
-    audio_url: init.file_url, task: 'transcribe', chunk_level: 'segment',
-  });
-  if (!sub.status_url) throw new Error('fal.ai did not start the transcription job.');
-  const out = await pollFalQueue(sub.status_url, sub.response_url, key, {
-    intervalMs: 5000, maxPolls: 72,
-    onTick: (s) => { if (onStatus) onStatus(`Transcribing… (${s.status === 'IN_QUEUE' ? 'queued' : 'working'})`); },
-    isCancelled,
-  });
-  if (out.cancelled) return { cancelled: true };
-  const data = out.data || {};
-  const chunks = Array.isArray(data.chunks) ? data.chunks : [];
+}
+
+// Transcribe in 30s chunks so progress + cancel work on slow devices.
+async function transcribeOnDevice(file, onStatus, isCancelled) {
+  if (!file) throw new Error('Upload your song first.');
+  const pcm16k = await decodeTo16kMono(file);
+  const transcriber = await getTranscriber(onStatus);
+  const CHUNK = 30 * 16000;
+  const total = Math.max(1, Math.ceil(pcm16k.length / CHUNK));
   const segments = [];
-  for (const c of chunks) {
-    let start = null, end = null;
-    if (Array.isArray(c.timestamp)) { start = Number(c.timestamp[0]); end = Number(c.timestamp[1]); }
-    else if (typeof c.start === 'number') { start = c.start; end = c.end; }
-    const text = String(c?.text || '').trim();
-    if (text && Number.isFinite(start) && Number.isFinite(end) && end > start) segments.push({ start, end, text });
+  for (let i = 0; i < total; i++) {
+    if (isCancelled && isCancelled()) return { cancelled: true };
+    if (onStatus) onStatus(`Transcribing… part ${i + 1} of ${total} (keep this tab open)`);
+    const slice = pcm16k.slice(i * CHUNK, (i + 1) * CHUNK);
+    const out = await transcriber(slice, { return_timestamps: true, chunk_length_s: 30, stride_length_s: 5 });
+    const offset = i * 30;
+    const chunks = (out && out.chunks) || [];
+    for (const c of chunks) {
+      const t = c.timestamp || [0, 0];
+      const text = String(c.text || '').trim();
+      if (text) segments.push({ start: offset + t[0], end: offset + t[1], text });
+    }
   }
-  const text = String(data.text || '').trim();
-  if (!text && !segments.length) {
-    throw new Error('fal.ai returned an empty transcript — the vocals may be buried in the mix. Paste the lyrics by hand instead.');
-  }
+  const text = segments.map((s) => s.text).join(' ').trim();
+  if (!text) throw new Error('Could not hear any vocals — try the free Colab notebook instead, it uses the bigger model.');
   return { text, segments };
 }
 
@@ -393,11 +357,6 @@ function loadLooks() {
 export default function DDCDirectorStudio() {
   const [activeTab, setActiveTab] = useState('timeline');
 
-  // Fal.ai key: user-typed, localStorage only, never in the repo.
-  const [falKey, setFalKey] = useState(() => { try { return localStorage.getItem(LS_KEY) || ''; } catch (e) { return ''; } });
-  const [showKey, setShowKey] = useState(false);
-  const [keySavedTick, setKeySavedTick] = useState(false);
-
   const bootRef = useRef(null);
   if (bootRef.current === null) bootRef.current = initializeProjects();
   const boot = bootRef.current;
@@ -455,7 +414,7 @@ export default function DDCDirectorStudio() {
   const [currentTime, setCurrentTime] = useState(0);
   const [activeSceneIndex, setActiveSceneIndex] = useState(0);
 
-  // Transcription state
+  // On-device transcription state
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcribeStatus, setTranscribeStatus] = useState('');
   const [transcribeError, setTranscribeError] = useState('');
@@ -1057,24 +1016,6 @@ export default function DDCDirectorStudio() {
     });
   };
 
-  /* ------------------------- fal.ai key ------------------------- */
-  const saveFalKey = () => {
-    try { localStorage.setItem(LS_KEY, falKey.trim()); } catch (e) {}
-    setKeySavedTick(true);
-    setTimeout(() => setKeySavedTick(false), 1600);
-  };
-  const clearFalKey = () => {
-    setFalKey('');
-    try { localStorage.removeItem(LS_KEY); } catch (e) {}
-  };
-  const needKey = () => {
-    if (!falKey.trim()) {
-      setTranscribeError('');
-      return false;
-    }
-    return true;
-  };
-
   /* ------------------------- Pollinations keyframes (free) ------------------------- */
   const handleGenerateFreeKeyframe = (index) => {
     const scene = segments[index];
@@ -1186,23 +1127,20 @@ export default function DDCDirectorStudio() {
     img.onerror = () => { setGeneratingPortraitId(null); };
   };
 
-  /* ------------------------- Whisper transcription ------------------------- */
+  /* ------------------------- On-device transcription (free) ------------------------- */
   const handleTranscribe = async () => {
-    if (!falKey.trim()) { setTranscribeError('Paste your fal.ai key above first — transcription runs on your fal.ai account.'); return; }
     if (!audioFileRef.current) { setTranscribeError('Upload your song first.'); return; }
     transcribeCancelRef.current = false;
     setIsTranscribing(true);
     setTranscribeError('');
-    setTranscribeStatus('Starting…');
+    setTranscribeStatus('Preparing audio…');
     try {
-      const out = await whisperTranscribe(falKey.trim(), audioFileRef.current,
+      const out = await transcribeOnDevice(audioFileRef.current,
         (s) => setTranscribeStatus(s),
         () => transcribeCancelRef.current);
       if (out.cancelled) { setTranscribeStatus('Cancelled.'); return; }
       // Lyrics text with timestamps
-      const lines = out.segments.length
-        ? out.segments.map(s => `[${fmtClock(s.start)}] ${s.text}`)
-        : [out.text];
+      const lines = out.segments.map((s) => `[${fmtClock(s.start)}] ${s.text}`);
       const newLyrics = lines.join('\n');
       setLyricsText(newLyrics);
       // Map timestamped chunks onto the scenes by time
@@ -1438,10 +1376,6 @@ export default function DDCDirectorStudio() {
         </div>
 
         <div className="flex items-center space-x-2">
-          <span
-            title={falKey.trim() ? 'fal.ai key saved in this browser' : 'No fal.ai key — lyric transcription needs one'}
-            className={`w-2.5 h-2.5 rounded-full ${falKey.trim() ? 'bg-emerald-400' : 'bg-slate-600'}`}
-          />
           <button
             onClick={() => setShowAssemblyModal(true)}
             className="text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg flex items-center space-x-1 transition shadow-md shadow-indigo-600/20"
@@ -1548,45 +1482,22 @@ export default function DDCDirectorStudio() {
               )}
             </div>
 
-            {/* Fal.ai key — browser only */}
+            {/* Free transcription — Colab notebook */}
             <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg">
               <div className="flex items-center space-x-2">
-                <Key className="w-4 h-4 text-amber-400" />
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">fal.ai key — lyric transcription</h3>
+                <Mic className="w-4 h-4 text-emerald-400" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">Free lyric transcription</h3>
               </div>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <div className="relative flex-1">
-                  <input
-                    type={showKey ? 'text' : 'password'}
-                    value={falKey}
-                    onChange={(e) => setFalKey(e.target.value)}
-                    placeholder="Paste your fal.ai API key here"
-                    autoComplete="off" spellCheck={false}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 pr-10 text-sm text-white font-mono focus:border-amber-500 focus:outline-none"
-                  />
-                  <button
-                    onClick={() => setShowKey(!showKey)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
-                  >
-                    <Eye className="w-4 h-4" />
-                  </button>
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={saveFalKey} className="text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white px-3 py-2 rounded-lg transition flex items-center space-x-1">
-                    {keySavedTick ? <Check className="w-3.5 h-3.5" /> : null}
-                    <span>{keySavedTick ? 'Saved' : 'Save key'}</span>
-                  </button>
-                  {falKey.trim() && (
-                    <button onClick={clearFalKey} className="text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-2 rounded-lg transition flex items-center space-x-1">
-                      <Trash2 className="w-3.5 h-3.5" /><span>Remove</span>
-                    </button>
-                  )}
-                </div>
-              </div>
-              <p className="text-[10px] text-slate-500">
-                Stored <span className="text-slate-300 font-bold">only in this browser</span> — never in the repo, never sent anywhere except fal.ai.
-                Get yours at fal.ai → API Keys. Transcription bills to your fal.ai account.
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                No API key, no cost. Open the notebook, upload your song, and get timestamped lyrics back in about a minute — then paste them into the Lyrics box below.
               </p>
+              <a
+                href={COLAB_TRANSCRIBE_URL}
+                target="_blank" rel="noreferrer"
+                className="inline-flex items-center space-x-1.5 text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg transition"
+              >
+                <span>Transcribe free in Colab ↗</span>
+              </a>
             </div>
 
             {/* Interval slicer */}
@@ -1642,14 +1553,23 @@ export default function DDCDirectorStudio() {
                   <Mic className="w-4 h-4 text-fuchsia-400" />
                   <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">Lyrics</h3>
                 </div>
-                <button
-                  onClick={handleTranscribe}
-                  disabled={isTranscribing || !audio || !falKey.trim()}
-                  className="text-xs font-bold bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-lg flex items-center space-x-1.5 transition"
-                >
-                  {isTranscribing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
-                  <span>{isTranscribing ? 'Transcribing…' : 'Auto-transcribe (Whisper)'}</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleTranscribe}
+                    disabled={isTranscribing || !audio}
+                    className="text-xs font-bold bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-lg flex items-center space-x-1.5 transition"
+                  >
+                    {isTranscribing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
+                    <span>{isTranscribing ? 'Transcribing…' : 'Auto-transcribe (free)'}</span>
+                  </button>
+                  <a
+                    href={COLAB_TRANSCRIBE_URL}
+                    target="_blank" rel="noreferrer"
+                    className="text-[11px] text-emerald-400 hover:text-emerald-300 underline"
+                  >
+                    Faster: free Colab GPU ↗
+                  </a>
+                </div>
               </div>
               {(isTranscribing || transcribeStatus) && !transcribeError && (
                 <p className="text-[11px] text-fuchsia-300 font-mono">{transcribeStatus}</p>
@@ -1661,6 +1581,9 @@ export default function DDCDirectorStudio() {
                 <button onClick={() => { transcribeCancelRef.current = true; }} className="text-[11px] text-slate-400 hover:text-slate-200 underline">
                   Cancel transcription
                 </button>
+              )}
+              {!isTranscribing && !transcribeStatus && (
+                <p className="text-[10px] text-slate-500">Runs on your device — free, no key. A full song takes a few minutes on a phone.</p>
               )}
               <textarea
                 rows={6}
@@ -2023,20 +1946,37 @@ export default function DDCDirectorStudio() {
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <label className="text-[10px] uppercase font-bold text-slate-400">Lyrics</label>
-                    <button
-                      onClick={handleTranscribe}
-                      disabled={isTranscribing || !audio || !falKey.trim()}
-                      className="text-xs font-bold bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-lg flex items-center space-x-1.5 transition"
-                    >
-                      {isTranscribing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
-                      <span>{isTranscribing ? 'Transcribing…' : 'Auto-transcribe (Whisper)'}</span>
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={handleTranscribe}
+                        disabled={isTranscribing || !audio}
+                        className="text-xs font-bold bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-lg flex items-center space-x-1.5 transition"
+                      >
+                        {isTranscribing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
+                        <span>{isTranscribing ? 'Transcribing…' : 'Auto-transcribe (free)'}</span>
+                      </button>
+                      <a
+                        href={COLAB_TRANSCRIBE_URL}
+                        target="_blank" rel="noreferrer"
+                        className="text-[11px] text-emerald-400 hover:text-emerald-300 underline"
+                      >
+                        Faster: free Colab GPU ↗
+                      </a>
+                    </div>
                   </div>
                   {(isTranscribing || transcribeStatus) && !transcribeError && (
                     <p className="text-[11px] text-fuchsia-300 font-mono">{transcribeStatus}</p>
                   )}
                   {transcribeError && (
                     <p className="text-xs text-red-400 flex items-center space-x-1.5"><AlertTriangle className="w-3.5 h-3.5" /><span>{transcribeError}</span></p>
+                  )}
+                  {isTranscribing && (
+                    <button onClick={() => { transcribeCancelRef.current = true; }} className="text-[11px] text-slate-400 hover:text-slate-200 underline">
+                      Cancel transcription
+                    </button>
+                  )}
+                  {!isTranscribing && !transcribeStatus && (
+                    <p className="text-[10px] text-slate-500">Runs on your device — free, no key. A full song takes a few minutes on a phone.</p>
                   )}
                   <textarea
                     rows={5}
@@ -2045,9 +1985,6 @@ export default function DDCDirectorStudio() {
                     placeholder={'Paste your lyrics here — one line per line.\n[00:10] Timestamps like this are fine too.'}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-fuchsia-500"
                   />
-                  {!falKey.trim() && (
-                    <p className="text-[10px] text-amber-400/80">Auto-transcribe needs your fal.ai key — paste it on the Timeline tab, or just paste lyrics by hand.</p>
-                  )}
                 </div>
                 <DirectorContinue next={2}>Continue to intervals</DirectorContinue>
               </div>
