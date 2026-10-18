@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>My Private Image Generator</title>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: 40px auto; text-align: center; background: #121212; color: #fff; }
+    textarea { width: 100%; height: 80px; padding: 10px; background: #222; color: #fff; border: 1px solid #444; border-radius: 8px; box-sizing: border-box; }
+    button { padding: 12px 24px; font-size: 16px; margin-top: 10px; cursor: pointer; background: #0070f3; color: white; border: none; border-radius: 6px; }
+    button:hover { background: #0051b3; }
+    img { max-width: 100%; margin-top: 20px; border-radius: 8px; display: none; }
+  </style>
+</head>
+<body>
+  <h2>Private Free Image Generator</h2>
+  <textarea id="prompt" placeholder="Enter your prompt..."></textarea><br>
+  <button onclick="generate()">Generate Image</button>
+  <br>
+  <p id="status"></p>
+  <img id="result" alt="Generated Image" />
+
+  <script>
+    function generate() {
+      const prompt = document.getElementById('prompt').value.trim();
+      if (!prompt) return alert('Please enter a prompt!');
+      
+      const status = document.getElementById('status');
+      const img = document.getElementById('result');
+      
+      status.innerText = "Generating...";
+      img.style.display = "none";
+
+      // Uses Pollinations' free, open endpoint
+      const seed = Math.floor(Math.random() * 1000000);
+      const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?seed=${seed}&nologo=true`;
+      
+      img.onload = () => {
+        status.innerText = "";
+        img.style.display = "block";
+      };
+      img.src = url;
+    }
+  </script>
+</body>
+</html>
