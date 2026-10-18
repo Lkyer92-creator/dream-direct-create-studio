@@ -7,12 +7,9 @@ import {
 } from 'lucide-react';
 
 /* ============================== FAL.AI CONFIG ============================== */
-// Kling v1.5 pro image-to-video and v1.6 pro text-to-video: 5s or 10s clips, 9:16.
 // Whisper: timestamped transcription (chunk_level=segment) so lyrics map onto scenes.
 // NOTE: the fal.ai key is typed into the app by the user and lives ONLY in this
 // browser's localStorage. It is never committed to the repo or sent anywhere but fal.ai.
-const FAL_KLING_I2V = 'fal-ai/kling-video/v1.5/pro/image-to-video';
-const FAL_KLING_T2V = 'fal-ai/kling-video/v1.6/pro/text-to-video';
 const FAL_WHISPER = 'fal-ai/whisper';
 const FAL_STORAGE_INITIATE = 'https://rest.alpha.fal.ai/storage/upload/initiate';
 
@@ -68,24 +65,6 @@ async function pollFalQueue(statusUrl, responseUrl, key, { intervalMs, maxPolls,
     if (s.status === 'FAILED') throw new Error('fal.ai failed this job. Try tweaking the prompt or input and run it again.');
   }
   throw new Error('Timed out waiting on fal.ai — check your fal.ai dashboard, the job may still finish there.');
-}
-
-// Real image-to-video / text-to-video via Kling on fal.ai. Billed to the user's fal.ai account.
-async function klingGenerate(key, { mode, prompt, imageUrl, duration, onTick, isCancelled }) {
-  const endpoint = mode === 'text' ? FAL_KLING_T2V : FAL_KLING_I2V;
-  const dur = duration === '10' ? '10' : '5';
-  const body = mode === 'text'
-    ? { prompt, duration: dur, aspect_ratio: '9:16' }
-    : { prompt, image_url: imageUrl, duration: dur, aspect_ratio: '9:16' };
-  const started = await falPost(endpoint, key, body);
-  if (!started.status_url) throw new Error('fal.ai did not return a status URL. Try again.');
-  const out = await pollFalQueue(started.status_url, started.response_url, key, {
-    intervalMs: 8000, maxPolls: 40, onTick, isCancelled,
-  });
-  if (out.cancelled) return { cancelled: true };
-  const url = out.data?.video?.url;
-  if (!url) throw new Error('Render finished but no video URL came back.');
-  return { url };
 }
 
 // Real audio -> timestamped lyrics via fal-ai/whisper.
@@ -300,9 +279,6 @@ export default function DDCDirectorStudio() {
   const [transcribeError, setTranscribeError] = useState('');
   const transcribeCancelRef = useRef(false);
 
-  // Per-scene Kling cancel flags
-  const klingCancelRef = useRef({});
-
   // Master Assembly Modal + Export Engine
   const [showAssemblyModal, setShowAssemblyModal] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -330,7 +306,6 @@ export default function DDCDirectorStudio() {
         cameraMovement: s.cameraMovement, setting: s.setting, lightingMood: s.lightingMood,
         approvedPrompt: s.approvedPrompt, keyframeImageUrl: s.keyframeImageUrl,
         brollPrompt: s.brollPrompt, lipsyncPrompt: s.lipsyncPrompt, videoPrompt: s.videoPrompt,
-        klingMode: s.klingMode, klingDuration: s.klingDuration,
         videoGen: s.videoGen && s.videoGen.status === 'done' ? { status: 'done', url: s.videoGen.url } : { status: 'idle' },
         trimStart: s.trimStart, trimEnd: s.trimEnd,
       }));
@@ -389,8 +364,6 @@ export default function DDCDirectorStudio() {
         brollPrompt: (p && p.brollPrompt) || '',
         lipsyncPrompt: (p && p.lipsyncPrompt) || '',
         videoPrompt: (p && p.videoPrompt) || '',
-        klingMode: (p && p.klingMode) || 'image',
-        klingDuration: (p && p.klingDuration) || '10',
         videoGen: (p && p.videoGen) || { status: 'idle' },
         clipUrl: (p && p.clipUrl) || null,
         clipName: (p && p.clipName) || '',
@@ -651,47 +624,6 @@ export default function DDCDirectorStudio() {
     reslice(audio.duration, currentInterval(), lyricsText, segments);
   };
 
-  /* ------------------------- Kling video generation ------------------------- */
-  const handleKlingGenerate = async (index) => {
-    const scene = segments[index];
-    if (!scene) return;
-    if (!falKey.trim()) {
-      updateScene(index, { videoGen: { status: 'error', error: 'Paste your fal.ai key in the Timeline tab first.' } });
-      setActiveTab('timeline');
-      return;
-    }
-    const mode = scene.klingMode || 'image';
-    if (mode === 'image' && !scene.keyframeImageUrl) {
-      updateScene(index, { videoGen: { status: 'error', error: 'Generate the keyframe still first — Kling animates from it.' } });
-      return;
-    }
-    const prompt = (scene.videoPrompt || '').trim() || compileVideoPrompt(scene);
-    if (!scene.videoPrompt) updateScene(index, { videoPrompt: prompt });
-    klingCancelRef.current[scene.id] = false;
-    updateScene(index, { videoGen: { status: 'working', note: 'Queued on fal.ai…' } });
-    try {
-      const out = await klingGenerate(falKey.trim(), {
-        mode,
-        prompt,
-        imageUrl: scene.keyframeImageUrl,
-        duration: scene.klingDuration || '10',
-        onTick: (s) => {
-          updateScene(index, { videoGen: { status: 'working', note: s.status === 'IN_QUEUE' ? 'In queue…' : 'Rendering…' } });
-        },
-        isCancelled: () => klingCancelRef.current[scene.id],
-      });
-      if (out.cancelled) { updateScene(index, { videoGen: { status: 'idle' } }); return; }
-      updateScene(index, { videoGen: { status: 'done', url: out.url } });
-    } catch (e) {
-      updateScene(index, { videoGen: { status: 'error', error: e.message || 'Generation failed.' } });
-    }
-  };
-
-  const cancelKling = (index) => {
-    const scene = segments[index];
-    if (scene) klingCancelRef.current[scene.id] = true;
-  };
-
   /* ------------------------- own clip upload ------------------------- */
   const handleClipUpload = (index, file) => {
     if (!file) return;
@@ -710,8 +642,8 @@ export default function DDCDirectorStudio() {
   };
 
   /* ------------------------- REAL EXPORT (ffmpeg.wasm in-browser) ------------------------- */
-  // Every scene becomes a 720x1280 h264 segment: motion clip if you have one
-  // (Kling render or your own upload, looped/trimmed to fill the scene), otherwise
+  // Every scene becomes a 720x1280 h264 segment: your uploaded motion clip
+  // (looped/trimmed to fill the scene) if you have one, otherwise
   // the keyframe still held for the scene's full length, otherwise a palette color
   // card. Segments are concatenated, then your actual uploaded song is muxed
   // underneath. The MP4 that downloads is the real finished video.
@@ -873,7 +805,7 @@ export default function DDCDirectorStudio() {
 
         <div className="flex items-center space-x-2">
           <span
-            title={falKey.trim() ? 'fal.ai key saved in this browser' : 'No fal.ai key — Kling video + transcription need one'}
+            title={falKey.trim() ? 'fal.ai key saved in this browser' : 'No fal.ai key — lyric transcription needs one'}
             className={`w-2.5 h-2.5 rounded-full ${falKey.trim() ? 'bg-emerald-400' : 'bg-slate-600'}`}
           />
           <button
@@ -986,7 +918,7 @@ export default function DDCDirectorStudio() {
             <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg">
               <div className="flex items-center space-x-2">
                 <Key className="w-4 h-4 text-amber-400" />
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">fal.ai key — Kling video + lyric transcription</h3>
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">fal.ai key — lyric transcription</h3>
               </div>
               <div className="flex flex-col sm:flex-row gap-2">
                 <div className="relative flex-1">
@@ -1019,7 +951,7 @@ export default function DDCDirectorStudio() {
               </div>
               <p className="text-[10px] text-slate-500">
                 Stored <span className="text-slate-300 font-bold">only in this browser</span> — never in the repo, never sent anywhere except fal.ai.
-                Get yours at fal.ai → API Keys. Kling renders bill to your fal.ai account.
+                Get yours at fal.ai → API Keys. Transcription bills to your fal.ai account.
               </p>
             </div>
 
@@ -1254,7 +1186,7 @@ export default function DDCDirectorStudio() {
                   </div>
                 )}
 
-                {/* Motion clip: Kling generation OR own upload */}
+                {/* Motion clip: your own upload */}
                 <div className="p-4 bg-purple-950/20 border border-purple-900/50 rounded-xl space-y-3">
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <div className="flex items-center space-x-2">
@@ -1272,55 +1204,10 @@ export default function DDCDirectorStudio() {
                     <video src={sceneVideoUrl} controls playsInline className="w-full max-w-[240px] mx-auto rounded-lg border border-slate-700 aspect-[9/16] object-cover bg-black" />
                   ) : (
                     <>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <div className="flex rounded-lg overflow-hidden border border-slate-700 text-[11px] font-bold">
-                          <button
-                            onClick={() => updateScene(selectedSceneIndex, { klingMode: 'image' })}
-                            className={`px-3 py-1.5 transition ${scene.klingMode !== 'text' ? 'bg-purple-600 text-white' : 'bg-slate-800 text-slate-400'}`}
-                          >
-                            From keyframe
-                          </button>
-                          <button
-                            onClick={() => updateScene(selectedSceneIndex, { klingMode: 'text' })}
-                            className={`px-3 py-1.5 transition ${scene.klingMode === 'text' ? 'bg-purple-600 text-white' : 'bg-slate-800 text-slate-400'}`}
-                          >
-                            Text only
-                          </button>
-                        </div>
-                        <div className="flex rounded-lg overflow-hidden border border-slate-700 text-[11px] font-bold">
-                          {['5', '10'].map(d => (
-                            <button
-                              key={d}
-                              onClick={() => updateScene(selectedSceneIndex, { klingDuration: d })}
-                              className={`px-3 py-1.5 transition ${scene.klingDuration === d ? 'bg-purple-600 text-white' : 'bg-slate-800 text-slate-400'}`}
-                            >
-                              {d}s
-                            </button>
-                          ))}
-                        </div>
-                        {vg.status === 'working' ? (
-                          <button onClick={() => cancelKling(selectedSceneIndex)} className="text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-lg flex items-center space-x-1.5 transition">
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" /><span>{vg.note || 'Rendering…'} (tap to cancel)</span>
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => handleKlingGenerate(selectedSceneIndex)}
-                            className="text-xs font-bold bg-purple-600 hover:bg-purple-500 text-white px-3 py-1.5 rounded-lg flex items-center space-x-1.5 transition shadow-md shadow-purple-600/30"
-                          >
-                            <Sparkles className="w-3.5 h-3.5" /><span>Generate with Kling</span>
-                          </button>
-                        )}
-                      </div>
-                      {vg.status === 'error' && (
-                        <p className="text-xs text-red-400 flex items-start space-x-1.5"><AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" /><span>{vg.error}</span></p>
-                      )}
                       <p className="text-[10px] text-slate-500">
-                        Kling renders 5s or 10s clips — the export loops the clip to fill this {scene.duration.toFixed(1)}s scene.
-                        {scene.klingMode !== 'text' && !scene.keyframeImageUrl && ' Generate the keyframe still first.'}
-                        {!falKey.trim() && ' Add your fal.ai key in the Timeline tab.'}
+                        Upload your own motion clip — the export loops/trims it to fill this {scene.duration.toFixed(1)}s scene.
                       </p>
                       <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-slate-500 uppercase font-bold">or upload your own clip</span>
                         <label className="cursor-pointer text-[11px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-lg flex items-center space-x-1.5 transition">
                           <Upload className="w-3.5 h-3.5" /><span>Choose video</span>
                           <input type="file" accept="video/*" className="hidden" onChange={(e) => handleClipUpload(selectedSceneIndex, e.target.files && e.target.files[0])} />
@@ -1357,7 +1244,7 @@ export default function DDCDirectorStudio() {
                   </div>
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
-                      <label className="text-xs font-bold text-slate-300">Image → video prompt <span className="text-slate-500 font-normal">(what Kling animates)</span></label>
+                      <label className="text-xs font-bold text-slate-300">Image → video prompt <span className="text-slate-500 font-normal">(paste into Runway)</span></label>
                       <button onClick={() => copyText('videop', scene.videoPrompt || compileVideoPrompt(scene))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
                         {copyFeedback === 'videop' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'videop' ? 'Copied' : 'Copy'}</span>
                       </button>
