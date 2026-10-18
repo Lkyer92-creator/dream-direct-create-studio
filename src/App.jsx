@@ -3,7 +3,7 @@ import {
   Play, Pause, Sparkles, Copy, Check, Film, Music, Sliders, Download,
   ChevronRight, Clapperboard, Video, RefreshCw, Scissors, Zap, X,
   MonitorPlay, FastForward, DownloadCloud, Cpu, CheckCircle, Upload,
-  Key, Mic, Clock, AlertTriangle, Loader2, Trash2, Eye, Plus, Wand2, FileAudio,
+  Key, Mic, Clock, AlertTriangle, Loader2, Trash2, Eye, Plus, Wand2, FileAudio, BookOpen,
 } from 'lucide-react';
 
 /* ============================== FAL.AI CONFIG ============================== */
@@ -118,6 +118,35 @@ async function whisperTranscribe(key, file, onStatus, isCancelled) {
   return { text, segments };
 }
 
+/* ============================== POLLINATIONS TEXT (free) ============================== */
+async function pollinationsChat(messages) {
+  const res = await fetch('https://text.pollinations.ai/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'openai', messages }),
+  });
+  if (!res.ok) throw new Error(`Pollinations text API failed (HTTP ${res.status}). Try again in a moment.`);
+  let data = null;
+  try { data = await res.json(); } catch (e) { throw new Error('Pollinations returned a bad response. Try again.'); }
+  const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+  if (!content) throw new Error('Pollinations returned an empty response. Try again.');
+  return content;
+}
+
+// Pull {"theme","storyline"} JSON out of the model reply; fall back to raw text.
+function parseThemeStoryline(content) {
+  const m = String(content).match(/\{[\s\S]*\}/);
+  if (m) {
+    try {
+      const j = JSON.parse(m[0]);
+      if (j && (j.theme || j.storyline)) {
+        return { theme: String(j.theme || ''), storyline: String(j.storyline || '') };
+      }
+    } catch (e) { /* fall through */ }
+  }
+  return { theme: '', storyline: String(content).trim() };
+}
+
 /* ============================== AUDIO HELPERS ============================== */
 async function decodeAudioFile(file) {
   const AC = window.AudioContext || window.webkitAudioContext;
@@ -203,6 +232,15 @@ function defaultEnergy(title) {
   return 5;
 }
 
+/* Director wizard steps: 1 Audio -> 2 Intervals -> 3 Theme -> 4 Storyboard -> 5 Bible */
+const DIRECTOR_STEPS = [
+  { key: 'audio', label: 'Audio' },
+  { key: 'intervals', label: 'Intervals' },
+  { key: 'theme', label: 'Theme' },
+  { key: 'storyboard', label: 'Storyboard' },
+  { key: 'bible', label: 'Bible' },
+];
+
 /* ============================== MAIN COMPONENT ============================== */
 const SectionBadge = ({ title }) => {
   const lowerTitle = (title || '').toLowerCase();
@@ -242,6 +280,8 @@ export default function DDCDirectorStudio() {
     artist: (saved && saved.artist) || '',
     intervalSeconds: (saved && saved.intervalSeconds) || 15,
     customSeconds: (saved && saved.customSeconds) || 20,
+    themeText: (saved && saved.themeText) || '',
+    storylineText: (saved && saved.storylineText) || '',
   });
   const [lyricsText, setLyricsText] = useState((saved && saved.lyricsText) || '');
 
@@ -266,6 +306,13 @@ export default function DDCDirectorStudio() {
   const [generatingImageId, setGeneratingImageId] = useState(null);
   const [generatingPortraitId, setGeneratingPortraitId] = useState(null);
   const [copyFeedback, setCopyFeedback] = useState(null);
+
+  // Director wizard state
+  const [directorStep, setDirectorStep] = useState(1);
+  const [isGeneratingTheme, setIsGeneratingTheme] = useState(false);
+  const [themeError, setThemeError] = useState('');
+  const [isBulkGenerating, setIsBulkGenerating] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState({ done: 0, total: 0 });
   const [loopEnabled, setLoopEnabled] = useState(true);
 
   // Playback state (driven by the real <audio> element)
@@ -306,12 +353,14 @@ export default function DDCDirectorStudio() {
         cameraMovement: s.cameraMovement, setting: s.setting, lightingMood: s.lightingMood,
         approvedPrompt: s.approvedPrompt, keyframeImageUrl: s.keyframeImageUrl,
         brollPrompt: s.brollPrompt, lipsyncPrompt: s.lipsyncPrompt, videoPrompt: s.videoPrompt,
+        biblePrompt: s.biblePrompt,
         videoGen: s.videoGen && s.videoGen.status === 'done' ? { status: 'done', url: s.videoGen.url } : { status: 'idle' },
         trimStart: s.trimStart, trimEnd: s.trimEnd,
       }));
       localStorage.setItem(LS_PROJECT, JSON.stringify({
         title: nextProject.title, artist: nextProject.artist,
         intervalSeconds: nextProject.intervalSeconds, customSeconds: nextProject.customSeconds,
+        themeText: nextProject.themeText || '', storylineText: nextProject.storylineText || '',
         lyricsText: nextLyrics, scenes,
       }));
     } catch (e) { /* storage full or unavailable — non-fatal */ }
@@ -329,6 +378,18 @@ export default function DDCDirectorStudio() {
   };
   const compileVideoPrompt = (scene) => {
     return `${scene.characterAction}, ${scene.cameraMovement.toLowerCase()} camera move, ${scene.cameraAngle.toLowerCase()}. Setting: ${scene.setting || lockedTheme.notes}. Lighting: ${scene.lightingMood}. Character: ${lockedChar.name} wearing ${lockedChar.outfit}. Colors: [${lockedPalette.hexes.join(', ')}]. Cinematic photorealistic motion, smooth natural movement, 9:16 vertical video.`;
+  };
+  // Full DIY production prompt for the Bible: paste into Runway / Kling yourself.
+  const compileBiblePrompt = (scene) => {
+    const charLine = `Character: ${lockedChar.name} — ${lockedChar.face}, ${lockedChar.hair}, wearing ${lockedChar.outfit}.`;
+    const sceneLine = `Scene (${scene.title}): ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}.`;
+    const camLine = `Camera angle: ${scene.cameraAngle}. Camera movement: ${scene.cameraMovement}.`;
+    const lookLine = `Lighting and mood: ${scene.lightingMood}. Palette: [${lockedPalette.hexes.join(', ')}]. Style: ${lockedStyle.descriptor}.`;
+    const syncLine = scene.lipSyncEnabled
+      ? ` LIP SYNC DIRECTIONS: extreme close-up on the character's face, singing directly into the lens for the full shot — mouth and lip movements must visibly match the lyric being sung: "${scene.lyrics}". Keep the face centered, sharp, and in focus the entire time; subtle slow dolly-in, no cuts away from the face.`
+      : '';
+    const diyLine = ` Wardrobe continuity: same outfit (${lockedChar.outfit}) in every shot; keep the character's face identical across all scenes. Vertical 9:16, photorealistic cinematic music video. Lyric for this shot: "${scene.lyrics}".`;
+    return `${charLine} ${sceneLine} ${camLine} ${lookLine}${syncLine}${diyLine}`;
   };
 
   /* ------------------------- segment builder ------------------------- */
@@ -364,6 +425,7 @@ export default function DDCDirectorStudio() {
         brollPrompt: (p && p.brollPrompt) || '',
         lipsyncPrompt: (p && p.lipsyncPrompt) || '',
         videoPrompt: (p && p.videoPrompt) || '',
+        biblePrompt: (p && p.biblePrompt) || '',
         videoGen: (p && p.videoGen) || { status: 'idle' },
         clipUrl: (p && p.clipUrl) || null,
         clipName: (p && p.clipName) || '',
@@ -564,6 +626,83 @@ export default function DDCDirectorStudio() {
       setGeneratingImageId(null);
     };
     img.onerror = () => { setGeneratingImageId(null); };
+  };
+
+  /* ------------------------- Director: theme + storyline (Pollinations text) ------------------------- */
+  const handleGenerateTheme = async () => {
+    if (!segments.length) { setThemeError('Slice your song into intervals first (Step 2).'); return; }
+    setIsGeneratingTheme(true);
+    setThemeError('');
+    try {
+      const sceneList = segments
+        .map(s => `${fmtClock(s.startTime)}–${fmtClock(s.endTime)} [${s.title}]: ${s.lyrics}`)
+        .join('\n');
+      const content = await pollinationsChat([
+        {
+          role: 'system',
+          content: 'You are a music video director. Given a song\'s timestamped lyrics, invent one cohesive visual world for its music video. Reply with ONLY valid JSON: {"theme": "...", "storyline": "..."}. "theme": 3-5 sentences — visual style, color palette, mood, cinematography, wardrobe. Vivid and specific. "storyline": 4-6 sentences — the narrative arc of the video across the song, referencing the sections by name.',
+        },
+        {
+          role: 'user',
+          content: `Song: "${project.title}"${project.artist ? ` by ${project.artist}` : ''}. Duration: ${audio ? fmtClock(audio.duration) : 'unknown'}. ${segments.length} scenes.\n\nTimestamped lyrics:\n${sceneList}\n\nLocked look for reference — style: ${lockedStyle.name} (${lockedStyle.descriptor}); palette: ${lockedPalette.name} (${lockedPalette.mood}); character: ${lockedChar.name} — ${lockedChar.face}, ${lockedChar.hair}, wearing ${lockedChar.outfit}; world: ${lockedTheme.name} (${lockedTheme.notes}).`,
+        },
+      ]);
+      const { theme, storyline } = parseThemeStoryline(content);
+      const p = { ...project, themeText: theme, storylineText: storyline };
+      setProject(p);
+      persist(p, lyricsText, segments);
+    } catch (e) {
+      setThemeError(e.message || 'Theme generation failed.');
+    } finally {
+      setIsGeneratingTheme(false);
+    }
+  };
+
+  /* ------------------------- Director: bulk storyboard visuals ------------------------- */
+  const generateVisualPromise = (scene) => new Promise((resolve) => {
+    const promptToUse = scene.approvedPrompt || compilePromptForScene(scene);
+    const seed = Math.floor(Math.random() * 999999);
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(promptToUse)}?width=720&height=1280&model=flux&seed=${seed}&nologo=true`;
+    const img = new Image();
+    img.src = imageUrl;
+    img.onload = () => resolve({ imageUrl, promptToUse });
+    img.onerror = () => resolve(null);
+  });
+
+  const handleGenerateAllVisuals = async (onlyMissing) => {
+    if (isBulkGenerating || !segments.length) return;
+    const targets = segments
+      .map((s, i) => ({ s, i }))
+      .filter(({ s }) => !onlyMissing || !s.keyframeImageUrl);
+    if (!targets.length) return;
+    setIsBulkGenerating(true);
+    setBulkProgress({ done: 0, total: targets.length });
+    for (const { s, i } of targets) {
+      const out = await generateVisualPromise(s);
+      if (out) updateScene(i, { keyframeImageUrl: out.imageUrl, approvedPrompt: out.promptToUse });
+      setBulkProgress((prev) => ({ done: prev.done + 1, total: prev.total }));
+    }
+    setIsBulkGenerating(false);
+  };
+
+  /* ------------------------- Director: shared interval picker ------------------------- */
+  const setIntervalChoice = (sec) => {
+    const p = { ...project, intervalSeconds: sec };
+    setProject(p);
+    const iv = sec === 'custom' ? (parseFloat(p.customSeconds) || 15) : sec;
+    if (audio) reslice(audio.duration, iv, lyricsText, segments);
+    else persist(p, lyricsText, segments);
+  };
+
+  /* ------------------------- Director: Bible copy-all ------------------------- */
+  const copyAllBible = () => {
+    const text = segments.map(s => (
+      `SCENE ${s.sceneNumber} — ${fmtClock(s.startTime)}–${fmtClock(s.endTime)} (${s.title})${s.lipSyncEnabled ? ' [LIP SYNC]' : ''}\n` +
+      `Lyrics: ${s.lyrics}\n` +
+      `Visual: ${s.keyframeImageUrl || '(no visual generated yet)'}\n` +
+      `Production prompt: ${s.biblePrompt || compileBiblePrompt(s)}`
+    )).join('\n\n---\n\n');
+    copyText('bible-all', text || 'No scenes yet.');
   };
 
   const handleGenerateCharacterPortrait = (charId, charPrompt) => {
@@ -783,6 +922,34 @@ export default function DDCDirectorStudio() {
   };
 
   const activeAssemblySegment = segments.find(seg => currentTime >= seg.startTime && currentTime < seg.endTime) || segments[0];
+
+  /* ------------------------- Director wizard: unlock rules ------------------------- */
+  const hasTheme = (project.themeText || '').trim().length > 0 || (project.storylineText || '').trim().length > 0;
+  const directorUnlocked = (step) => {
+    if (step <= 1) return true;
+    if (step === 2) return !!audio;
+    if (step === 3) return segments.length > 0;
+    return hasTheme; // steps 4 + 5
+  };
+  const maxDirectorStep = DIRECTOR_STEPS.map((_, i) => i + 1).filter(directorUnlocked).length;
+  const shownDirectorStep = Math.min(directorStep, Math.max(1, maxDirectorStep));
+
+  const DirectorContinue = ({ next, children }) => (
+    directorUnlocked(next) ? (
+      <button
+        onClick={() => setDirectorStep(next)}
+        className="w-full text-sm font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-2.5 rounded-xl transition flex items-center justify-center space-x-2"
+      >
+        <span>{children || 'Continue'}</span>
+        <ChevronRight className="w-4 h-4" />
+      </button>
+    ) : null
+  );
+
+  // Auto-advance out of Step 1 once a song is loaded
+  useEffect(() => {
+    if (activeTab === 'director' && directorStep === 1 && audio) setDirectorStep(2);
+  }, [audio, activeTab, directorStep]);
 
   return (
     <div className="flex flex-col min-h-screen bg-[#07090e] text-slate-100 font-sans pb-24 md:pb-16">
@@ -1311,6 +1478,345 @@ export default function DDCDirectorStudio() {
           );
         })()}
 
+        {/* ================= DIRECTOR TAB ================= */}
+        {activeTab === 'director' && (
+          <div className="space-y-5 animate-fadeIn">
+            {/* Stepper */}
+            <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3 shadow-lg">
+              <div className="flex items-center gap-1">
+                {DIRECTOR_STEPS.map((st, i) => {
+                  const n = i + 1;
+                  const unlocked = directorUnlocked(n);
+                  const isCurrent = shownDirectorStep === n;
+                  const done = n < shownDirectorStep;
+                  return (
+                    <button
+                      key={st.key}
+                      disabled={!unlocked}
+                      onClick={() => setDirectorStep(n)}
+                      className="flex-1 flex flex-col items-center py-1.5 rounded-xl transition disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      <span className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-black border transition ${isCurrent ? 'bg-cyan-500 text-slate-950 border-cyan-400 shadow-md shadow-cyan-500/30' : done ? 'bg-emerald-900 text-emerald-300 border-emerald-700' : 'bg-slate-800 text-slate-400 border-slate-700'}`}>
+                        {done ? <Check className="w-4 h-4" /> : n}
+                      </span>
+                      <span className={`text-[9px] font-bold uppercase tracking-wider mt-1 ${isCurrent ? 'text-cyan-300' : 'text-slate-500'}`}>{st.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* STEP 1 — Audio + lyrics */}
+            {shownDirectorStep === 1 && (
+              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-4 shadow-lg">
+                <h2 className="text-sm font-bold text-white flex items-center space-x-2">
+                  <FileAudio className="w-4 h-4 text-cyan-400" /><span>Step 1 — Your song</span>
+                </h2>
+                {!audio ? (
+                  <label className="block cursor-pointer">
+                    <input type="file" accept="audio/*" className="hidden" onChange={(e) => handleAudioFile(e.target.files && e.target.files[0])} />
+                    <div className="border-2 border-dashed border-slate-700 hover:border-cyan-500 rounded-2xl p-8 text-center transition">
+                      {isDecoding ? <Loader2 className="w-8 h-8 text-cyan-400 animate-spin mx-auto mb-2" /> : <FileAudio className="w-8 h-8 text-cyan-400 mx-auto mb-2" />}
+                      <p className="text-sm font-bold text-white">{isDecoding ? 'Reading your audio…' : 'Upload your song'}</p>
+                      <p className="text-[11px] text-slate-400 mt-1">MP3, WAV, M4A</p>
+                    </div>
+                  </label>
+                ) : (
+                  <div className="flex items-center justify-between flex-wrap gap-2 bg-slate-950/60 border border-slate-800 rounded-xl p-3">
+                    <span className="text-xs font-bold text-white flex items-center space-x-2 min-w-0">
+                      <Music className="w-4 h-4 text-cyan-400 flex-shrink-0" />
+                      <span className="truncate">{audio.name}</span>
+                      <span className="text-cyan-400 font-mono">· {formatTime(audio.duration).slice(0, 5)}</span>
+                    </span>
+                    <label className="cursor-pointer text-[11px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-2 rounded-lg flex items-center space-x-1.5 transition">
+                      <Upload className="w-3.5 h-3.5" /><span>Swap song</span>
+                      <input type="file" accept="audio/*" className="hidden" onChange={(e) => handleAudioFile(e.target.files && e.target.files[0])} />
+                    </label>
+                  </div>
+                )}
+                {audioError && (
+                  <p className="text-xs text-red-400 flex items-center space-x-1.5"><AlertTriangle className="w-3.5 h-3.5" /><span>{audioError}</span></p>
+                )}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] uppercase font-bold text-slate-400">Lyrics</label>
+                    <button
+                      onClick={handleTranscribe}
+                      disabled={isTranscribing || !audio || !falKey.trim()}
+                      className="text-xs font-bold bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-lg flex items-center space-x-1.5 transition"
+                    >
+                      {isTranscribing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
+                      <span>{isTranscribing ? 'Transcribing…' : 'Auto-transcribe (Whisper)'}</span>
+                    </button>
+                  </div>
+                  {(isTranscribing || transcribeStatus) && !transcribeError && (
+                    <p className="text-[11px] text-fuchsia-300 font-mono">{transcribeStatus}</p>
+                  )}
+                  {transcribeError && (
+                    <p className="text-xs text-red-400 flex items-center space-x-1.5"><AlertTriangle className="w-3.5 h-3.5" /><span>{transcribeError}</span></p>
+                  )}
+                  <textarea
+                    rows={5}
+                    value={lyricsText}
+                    onChange={(e) => { setLyricsText(e.target.value); persist(project, e.target.value, segments); }}
+                    placeholder={'Paste your lyrics here — one line per line.\n[00:10] Timestamps like this are fine too.'}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-fuchsia-500"
+                  />
+                  {!falKey.trim() && (
+                    <p className="text-[10px] text-amber-400/80">Auto-transcribe needs your fal.ai key — paste it on the Timeline tab, or just paste lyrics by hand.</p>
+                  )}
+                </div>
+                <DirectorContinue next={2}>Continue to intervals</DirectorContinue>
+              </div>
+            )}
+
+            {/* STEP 2 — Timestamped intervals */}
+            {shownDirectorStep === 2 && (
+              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-4 shadow-lg">
+                <h2 className="text-sm font-bold text-white flex items-center space-x-2">
+                  <Clock className="w-4 h-4 text-cyan-400" /><span>Step 2 — Timestamped intervals</span>
+                </h2>
+                <div className="flex flex-wrap items-center gap-2">
+                  {[10, 15, 20, 30].map((sec) => (
+                    <button
+                      key={sec}
+                      onClick={() => setIntervalChoice(sec)}
+                      className={`text-xs font-bold px-3 py-1.5 rounded-lg border transition ${project.intervalSeconds === sec ? 'bg-cyan-500 text-slate-950 border-cyan-400' : 'bg-slate-800 text-slate-300 border-slate-700 hover:border-slate-500'}`}
+                    >
+                      {sec}s
+                    </button>
+                  ))}
+                  <button
+                    onClick={() => setIntervalChoice('custom')}
+                    className={`text-xs font-bold px-3 py-1.5 rounded-lg border transition ${project.intervalSeconds === 'custom' ? 'bg-cyan-500 text-slate-950 border-cyan-400' : 'bg-slate-800 text-slate-300 border-slate-700 hover:border-slate-500'}`}
+                  >
+                    Custom
+                  </button>
+                  {project.intervalSeconds === 'custom' && (
+                    <span className="flex items-center gap-1.5">
+                      <input
+                        type="number" min="1" max="120" value={project.customSeconds}
+                        onChange={(e) => { const p = { ...project, customSeconds: e.target.value }; setProject(p); persist(p, lyricsText, segments); }}
+                        className="w-16 bg-slate-950 border border-slate-700 rounded-lg p-1.5 text-xs text-white focus:border-cyan-500 focus:outline-none"
+                      />
+                      <span className="text-[11px] text-slate-400">sec</span>
+                      <button
+                        onClick={() => { if (audio) reslice(audio.duration, parseFloat(project.customSeconds) || 15, lyricsText, segments); }}
+                        className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-3 py-1.5 rounded-lg transition"
+                      >
+                        Slice
+                      </button>
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  {audio
+                    ? `Covers the full ${formatTime(audio.duration).slice(0, 5)} → ${segments.length} interval${segments.length === 1 ? '' : 's'}, each carrying its lyric chunk.`
+                    : 'Upload your song in Step 1 first.'}
+                </p>
+                <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                  {segments.map((s) => (
+                    <div key={s.id} className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl">
+                      <div className="flex items-center space-x-2 mb-1 flex-wrap gap-y-1">
+                        <span className="text-[10px] font-black text-slate-300">Scene {s.sceneNumber}</span>
+                        <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
+                        <SectionBadge title={s.title} />
+                        {s.keyframeImageUrl && (
+                          <span className="text-[9px] font-bold bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-800">STILL</span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-400 italic line-clamp-2">"{s.lyrics}"</p>
+                    </div>
+                  ))}
+                </div>
+                <DirectorContinue next={3}>Continue to theme</DirectorContinue>
+              </div>
+            )}
+
+            {/* STEP 3 — Theme + storyline */}
+            {shownDirectorStep === 3 && (
+              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-4 shadow-lg">
+                <h2 className="text-sm font-bold text-white flex items-center space-x-2">
+                  <Sparkles className="w-4 h-4 text-amber-400" /><span>Step 3 — Theme + storyline</span>
+                </h2>
+                <button
+                  onClick={handleGenerateTheme}
+                  disabled={isGeneratingTheme || !segments.length}
+                  className="w-full text-sm font-bold bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-xl transition flex items-center justify-center space-x-2"
+                >
+                  {isGeneratingTheme ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+                  <span>{isGeneratingTheme ? 'Dreaming up your world…' : 'Generate theme + storyline (free)'}</span>
+                </button>
+                {themeError && (
+                  <p className="text-xs text-red-400 flex items-center space-x-1.5"><AlertTriangle className="w-3.5 h-3.5" /><span>{themeError}</span></p>
+                )}
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase font-bold text-slate-400">Visual theme <span className="text-slate-600 normal-case">(style · palette · mood — editable)</span></label>
+                  <textarea
+                    rows={5}
+                    value={project.themeText}
+                    onChange={(e) => { const p = { ...project, themeText: e.target.value }; setProject(p); persist(p, lyricsText, segments); }}
+                    placeholder="Hit generate — or write your own visual world here."
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase font-bold text-slate-400">Storyline <span className="text-slate-600 normal-case">(the video's narrative arc — editable)</span></label>
+                  <textarea
+                    rows={6}
+                    value={project.storylineText}
+                    onChange={(e) => { const p = { ...project, storylineText: e.target.value }; setProject(p); persist(p, lyricsText, segments); }}
+                    placeholder="Hit generate — or write your own storyline here."
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+                <p className="text-[10px] text-slate-500">AI-drafted, free via Pollinations — rewrite anything. This guides every visual and the Bible.</p>
+                <DirectorContinue next={4}>Continue to storyboard</DirectorContinue>
+              </div>
+            )}
+
+            {/* STEP 4 — Storyboard */}
+            {shownDirectorStep === 4 && (
+              <div className="space-y-4">
+                <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg flex items-center justify-between flex-wrap gap-3">
+                  <h2 className="text-sm font-bold text-white flex items-center space-x-2">
+                    <Film className="w-4 h-4 text-emerald-400" /><span>Step 4 — Storyboard</span>
+                  </h2>
+                  <button
+                    onClick={() => handleGenerateAllVisuals(true)}
+                    disabled={isBulkGenerating || !segments.length}
+                    className="text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-2 rounded-lg flex items-center space-x-1.5 transition"
+                  >
+                    {isBulkGenerating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                    <span>{isBulkGenerating ? `Generating ${bulkProgress.done}/${bulkProgress.total}…` : 'Generate all visuals'}</span>
+                  </button>
+                </div>
+                {segments.map((s, i) => {
+                  const isGen = generatingImageId === s.id;
+                  return (
+                    <div key={s.id} className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg">
+                      <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+                        <span className="text-[10px] font-black text-slate-300">Scene {s.sceneNumber}</span>
+                        <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
+                        <SectionBadge title={s.title} />
+                        {s.lipSyncEnabled && (
+                          <span className="text-[9px] font-bold bg-fuchsia-950 text-fuchsia-300 px-1.5 py-0.5 rounded border border-fuchsia-800">LIP SYNC</span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-400 italic">"{s.lyrics}"</p>
+                      <div className="flex gap-3">
+                        <div className="w-24 flex-shrink-0">
+                          {s.keyframeImageUrl ? (
+                            <img src={s.keyframeImageUrl} alt={`Scene ${s.sceneNumber} visual`} className="w-full aspect-[9/16] object-cover rounded-lg border border-slate-700" />
+                          ) : (
+                            <div className="w-full aspect-[9/16] rounded-lg border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
+                              <span className="text-[9px] text-slate-600 text-center px-2">No visual yet</span>
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0 space-y-2">
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              onClick={() => handleGenerateFreeKeyframe(i)}
+                              disabled={isGen || isBulkGenerating}
+                              className="text-[10px] font-bold bg-emerald-600/30 hover:bg-emerald-600/50 disabled:opacity-40 border border-emerald-500/40 text-emerald-300 px-2 py-1.5 rounded-lg flex items-center space-x-1 transition"
+                            >
+                              {isGen ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                              <span>{isGen ? 'Working…' : s.keyframeImageUrl ? 'Re-roll' : 'Generate'}</span>
+                            </button>
+                            <button
+                              onClick={() => updateScene(i, { lipSyncEnabled: !s.lipSyncEnabled })}
+                              className={`text-[10px] font-bold px-2 py-1.5 rounded-lg border flex items-center space-x-1 transition ${s.lipSyncEnabled ? 'bg-fuchsia-600/30 border-fuchsia-500 text-fuchsia-300' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
+                            >
+                              <Mic className="w-3 h-3" /><span>{s.lipSyncEnabled ? 'Lip sync: ON' : 'Lip sync: off'}</span>
+                            </button>
+                          </div>
+                          <textarea
+                            rows={3}
+                            value={s.approvedPrompt || compilePromptForScene(s)}
+                            onChange={(e) => updateScene(i, { approvedPrompt: e.target.value })}
+                            className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+                <DirectorContinue next={5}>Continue to the Bible</DirectorContinue>
+              </div>
+            )}
+
+            {/* STEP 5 — Bible */}
+            {shownDirectorStep === 5 && (
+              <div className="space-y-4">
+                <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg flex items-center justify-between flex-wrap gap-3">
+                  <div>
+                    <h2 className="text-sm font-bold text-white flex items-center space-x-2">
+                      <BookOpen className="w-4 h-4 text-indigo-400" /><span>Step 5 — The Bible</span>
+                    </h2>
+                    <p className="text-[10px] text-slate-500 mt-1">Everything you need to shoot this video yourself — one card per scene.</p>
+                  </div>
+                  <button
+                    onClick={copyAllBible}
+                    disabled={!segments.length}
+                    className="text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white px-3 py-2 rounded-lg flex items-center space-x-1.5 transition"
+                  >
+                    {copyFeedback === 'bible-all' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copyFeedback === 'bible-all' ? 'Copied!' : 'Copy all prompts'}</span>
+                  </button>
+                </div>
+                {segments.map((s, i) => (
+                  <div key={s.id} className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg">
+                    <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+                      <span className="text-[10px] font-black text-slate-300">Scene {s.sceneNumber}</span>
+                      <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
+                      <SectionBadge title={s.title} />
+                      {s.lipSyncEnabled && (
+                        <span className="text-[9px] font-bold bg-fuchsia-950 text-fuchsia-300 px-1.5 py-0.5 rounded border border-fuchsia-800">LIP SYNC</span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-300"><span className="text-slate-500 font-bold">Lyrics: </span><span className="italic">"{s.lyrics}"</span></p>
+                    <div className="flex gap-3">
+                      <div className="w-28 flex-shrink-0">
+                        {s.keyframeImageUrl ? (
+                          <img src={s.keyframeImageUrl} alt={`Scene ${s.sceneNumber} visual`} className="w-full aspect-[9/16] object-cover rounded-lg border border-slate-700" />
+                        ) : (
+                          <div className="w-full aspect-[9/16] rounded-lg border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
+                            <span className="text-[9px] text-slate-600 text-center px-2">No visual yet — make one in Step 4</span>
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0 space-y-2">
+                        <div className="flex justify-between items-center">
+                          <label className="text-[10px] uppercase font-bold text-slate-400">Production prompt <span className="text-slate-600 normal-case">(paste into Runway)</span></label>
+                          <button
+                            onClick={() => copyText(`bible-${s.id}`, s.biblePrompt || compileBiblePrompt(s))}
+                            className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition"
+                          >
+                            {copyFeedback === `bible-${s.id}` ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                            <span>{copyFeedback === `bible-${s.id}` ? 'Copied' : 'Copy'}</span>
+                          </button>
+                        </div>
+                        <textarea
+                          rows={6}
+                          value={s.biblePrompt || compileBiblePrompt(s)}
+                          onChange={(e) => updateScene(i, { biblePrompt: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {!segments.length && (
+                  <p className="text-xs text-slate-500 bg-slate-900/60 border border-slate-800 rounded-xl p-4 text-center">
+                    No scenes yet — start at Step 1 with your song.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ================= ASSETS TAB ================= */}
         {activeTab === 'assets' && (
           <div className="space-y-5 animate-fadeIn">
@@ -1357,6 +1863,9 @@ export default function DDCDirectorStudio() {
 
       {/* MOBILE BOTTOM NAVIGATION */}
       <nav className="fixed bottom-0 left-0 right-0 z-40 bg-[#0a0d14]/95 backdrop-blur-lg border-t border-slate-800 px-3 py-2 flex items-center justify-around">
+        <button onClick={() => setActiveTab('director')} className={`flex flex-col items-center ${activeTab === 'director' ? 'text-cyan-400' : 'text-slate-500 hover:text-slate-300 transition'}`}>
+          <Wand2 className="w-4 h-4 mb-0.5" /><span className="text-[10px]">Director</span>
+        </button>
         <button onClick={() => setActiveTab('timeline')} className={`flex flex-col items-center ${activeTab === 'timeline' ? 'text-cyan-400' : 'text-slate-500 hover:text-slate-300 transition'}`}>
           <Sliders className="w-4 h-4 mb-0.5" /><span className="text-[10px]">Timeline</span>
         </button>
