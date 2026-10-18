@@ -261,6 +261,16 @@ function fmtClock(sec) {
   const s = Math.floor(sec % 60);
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
+/* Parse a user-typed time: "m:ss" (e.g. 1:05) or plain seconds. Returns seconds or null. */
+function parseTimeInput(str) {
+  if (str == null) return null;
+  const t = String(str).trim();
+  if (!t) return null;
+  const m = t.match(/^(\d+):([0-5]?\d(?:\.\d+)?)$/);
+  if (m) return parseInt(m[1], 10) * 60 + parseFloat(m[2]);
+  const f = parseFloat(t);
+  return Number.isFinite(f) && f >= 0 ? f : null;
+}
 
 /* ============================== DEFAULT ASSETS ============================== */
 const DEFAULT_PALETTES = [
@@ -290,8 +300,12 @@ const SECTION_ORDER = ['Intro', 'Verse 1', 'Pre-Chorus', 'Chorus', 'Verse 2', 'C
 /* Editable section labels — the auto-guess from defaultTitle is only the starting value;
    she can override every segment from the Sections step. */
 const SECTION_LABELS = [
-  'Intro', 'Verse 1', 'Verse 1a', 'Verse 1b', 'Verse 2', 'Verse 3',
-  'Pre-Chorus', 'Chorus', 'Post-Chorus', 'Bridge', 'Break',
+  'Intro',
+  'Verse 1', 'Verse 1a', 'Verse 1b',
+  'Verse 2', 'Verse 2a', 'Verse 2b',
+  'Verse 3', 'Verse 3a', 'Verse 3b',
+  'Pre-Chorus', 'Chorus', 'Post-Chorus',
+  'Bridge', 'Bridge 2', 'Break',
   'Instrumental', 'Interlude', 'Outro',
 ];
 function defaultTitle(i, n) {
@@ -449,6 +463,7 @@ export default function DDCDirectorStudio() {
   const [audio, setAudio] = useState(null); // { name, url, duration, peaks }
   const [isDecoding, setIsDecoding] = useState(false);
   const [audioError, setAudioError] = useState('');
+  const [timeHints, setTimeHints] = useState({}); // per-scene timing validation notes, keyed by scene id
   const audioFileRef = useRef(null);
   const audioRef = useRef(null);
   const playRangeRef = useRef(null);
@@ -494,6 +509,8 @@ export default function DDCDirectorStudio() {
   const ffmpegRef = useRef(null);
   const canvasRef = useRef(null);
   const copyTimerRef = useRef(null);
+  const timeHintTimers = useRef({});
+  const timeInputRefs = useRef({}); // { [sceneId]: { start: el, end: el } }
 
   const [showCastPicker, setShowCastPicker] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
@@ -880,11 +897,18 @@ export default function DDCDirectorStudio() {
     const per = Math.max(1, Math.ceil(lyricLines.length / n));
     const segs = [];
     for (let i = 0; i < n; i++) {
-      const start = i * iv;
-      const end = Math.min((i + 1) * iv, duration);
+      const uStart = i * iv;
+      const uEnd = Math.min((i + 1) * iv, duration);
       const title = defaultTitle(i, n);
       const lines = lyricLines.slice(i * per, (i + 1) * per).join(' ').replace(/\[\d{2}:\d{2}(?:\.\d)?\]/g, '').trim();
       const p = prev && prev[i];
+      // Per-scene custom times survive re-slices; everything else follows the uniform grid.
+      let start = uStart, end = uEnd, custom = false;
+      if (p && p.customTimes && typeof p.startTime === 'number' && typeof p.endTime === 'number') {
+        const cs = Math.min(Math.max(p.startTime, 0), duration);
+        const ce = Math.min(Math.max(p.endTime, 0), duration);
+        if (ce > cs) { start = cs; end = ce; custom = true; }
+      }
       segs.push({
         id: `scene-${i + 1}`,
         sceneNumber: i + 1,
@@ -892,6 +916,7 @@ export default function DDCDirectorStudio() {
         startTime: start,
         endTime: end,
         duration: end - start,
+        customTimes: custom,
         energyLevel: (p && typeof p.energyLevel === 'number') ? p.energyLevel : defaultEnergy(title),
         lyrics: lines || (p && p.lyrics) || '(Instrumental / Beat)',
         shotType: (p && p.shotType) || (i % 2 === 0 ? 'Lip sync' : 'Motion clip'),
@@ -913,7 +938,7 @@ export default function DDCDirectorStudio() {
         clipUrl: (p && p.clipUrl) || null,
         clipName: (p && p.clipName) || '',
         trimStart: (p && typeof p.trimStart === 'number') ? p.trimStart : 0,
-        trimEnd: (p && typeof p.trimEnd === 'number') ? p.trimEnd : (end - start),
+        trimEnd: (p && typeof p.trimEnd === 'number') ? Math.min(p.trimEnd, Math.max(0.1, end - start)) : (end - start),
       });
     }
     return segs;
@@ -1118,6 +1143,117 @@ export default function DDCDirectorStudio() {
     const iv = sec === 'custom' ? (parseFloat(p.customSeconds) || 15) : sec;
     if (audio) reslice(audio.duration, iv, lyricsText, segments);
     else persist(p, lyricsText, segments);
+  };
+
+  /* ------------------------- Per-scene custom times -------------------------
+     The global interval presets re-slice the whole song uniformly, but any scene
+     can have its own hand-edited start/end. Custom scenes keep their times
+     across re-slices (see buildSegments); neighbors are never auto-shifted —
+     overlaps or gaps are allowed and every view uses each scene's own times. */
+  const flashTimeHint = (id, msg) => {
+    setTimeHints(prev => ({ ...prev, [id]: msg }));
+    if (timeHintTimers.current[id]) clearTimeout(timeHintTimers.current[id]);
+    timeHintTimers.current[id] = setTimeout(() => {
+      setTimeHints(prev => { const n = { ...prev }; delete n[id]; return n; });
+      delete timeHintTimers.current[id];
+    }, 2800);
+  };
+
+  const updateSceneTimes = (index, startStr, endStr) => {
+    const s = segments[index];
+    if (!s) return;
+    const dur = audio && audio.duration ? audio.duration : 0;
+    if (!dur) { flashTimeHint(s.id, 'Load a song first'); return; }
+    const ps = parseTimeInput(startStr);
+    const pe = parseTimeInput(endStr);
+    if (ps == null || pe == null) { flashTimeHint(s.id, 'Use m:ss, e.g. 1:05'); return; }
+    const ns = Math.min(Math.max(ps, 0), dur);
+    const ne = Math.min(Math.max(pe, 0), dur);
+    const clamped = ns !== ps || ne !== pe;
+    if (!(ne > ns)) { flashTimeHint(s.id, 'End must be after start'); return; }
+    const newDur = ne - ns;
+    updateScene(index, {
+      startTime: ns,
+      endTime: ne,
+      duration: newDur,
+      customTimes: true,
+      trimStart: Math.min(s.trimStart || 0, Math.max(0, newDur - 0.1)),
+      trimEnd: Math.min(s.trimEnd != null ? s.trimEnd : newDur, newDur),
+    });
+    if (clamped) flashTimeHint(s.id, `Clamped to song length (${fmtClock(dur)})`);
+  };
+
+  const resetSceneTimes = (index) => {
+    const s = segments[index];
+    if (!s) return;
+    const iv = currentInterval();
+    const dur = audio && audio.duration ? audio.duration : s.endTime;
+    const uStart = index * iv;
+    const uEnd = Math.min(uStart + iv, dur);
+    if (!(uEnd > uStart)) { flashTimeHint(s.id, 'No uniform slot for this scene'); return; }
+    updateScene(index, {
+      startTime: uStart,
+      endTime: uEnd,
+      duration: uEnd - uStart,
+      customTimes: false,
+      trimStart: 0,
+      trimEnd: uEnd - uStart,
+    });
+    flashTimeHint(s.id, 'Back on the interval grid');
+  };
+
+  const applyTimeInputs = (index, s) => {
+    const m = timeInputRefs.current[s.id];
+    if (!m || !m.start || !m.end) return;
+    updateSceneTimes(index, m.start.value, m.end.value);
+  };
+
+  /* Shared start/end editor used in the Sections step and the Scenes tab. */
+  const renderTimeEditor = (index, s) => {
+    const rid = s.id;
+    const reg = (which) => (el) => {
+      const m = timeInputRefs.current[rid] || {};
+      if (el) m[which] = el;
+      timeInputRefs.current[rid] = m;
+    };
+    const inputCls = 'w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-white font-mono focus:border-cyan-500 focus:outline-none';
+    return (
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[10px] uppercase font-bold text-slate-500">Timing</span>
+        <input
+          ref={reg('start')}
+          key={`${rid}-ts-${s.startTime.toFixed(2)}`}
+          defaultValue={fmtClock(s.startTime)}
+          onBlur={() => applyTimeInputs(index, s)}
+          onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+          placeholder="m:ss"
+          aria-label="Scene start time"
+          className={inputCls}
+        />
+        <span className="text-slate-600 text-xs">–</span>
+        <input
+          ref={reg('end')}
+          key={`${rid}-te-${s.endTime.toFixed(2)}`}
+          defaultValue={fmtClock(s.endTime)}
+          onBlur={() => applyTimeInputs(index, s)}
+          onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+          placeholder="m:ss"
+          aria-label="Scene end time"
+          className={inputCls}
+        />
+        {s.customTimes && (
+          <span className="text-[9px] font-bold bg-amber-950 text-amber-300 px-1.5 py-0.5 rounded border border-amber-800">CUSTOM</span>
+        )}
+        {s.customTimes && (
+          <button onClick={() => resetSceneTimes(index)} className="text-[10px] font-bold text-slate-400 hover:text-cyan-300 underline transition">
+            Reset to interval
+          </button>
+        )}
+        {timeHints[rid] && (
+          <span className="text-[10px] text-amber-300">{timeHints[rid]}</span>
+        )}
+      </div>
+    );
   };
 
   /* ------------------------- Director: Bible copy-all ------------------------- */
@@ -1773,6 +1909,7 @@ export default function DDCDirectorStudio() {
                     </div>
                     <h2 className="text-base font-bold text-white mt-1">Scene {scene.sceneNumber}: {scene.title}</h2>
                     <p className="text-[11px] text-slate-400 italic mt-1">"{scene.lyrics}"</p>
+                    <div className="mt-2">{renderTimeEditor(selectedSceneIndex, scene)}</div>
                   </div>
 
                   <label className="cursor-pointer w-full sm:w-auto bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-emerald-300 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 transition active:scale-95 flex-shrink-0">
@@ -2128,6 +2265,7 @@ export default function DDCDirectorStudio() {
                           <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
                           <SectionBadge title={s.title} />
                         </div>
+                        {renderTimeEditor(i, s)}
                         <p className="text-[11px] text-slate-400 italic line-clamp-1">"{s.lyrics}"</p>
                         <div className="flex gap-2">
                           <select
