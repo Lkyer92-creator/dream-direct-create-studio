@@ -60,15 +60,23 @@ A guided 6-step wizard (the **Director** tab):
 - **Assets** — per-project continuity: this project's cast (pull from your library),
   locked palette/style/world pickers — every prompt inherits the locked set.
 
-## Audio → lyrics transcription
+## Audio → lyrics (free, no API key)
 
-The **Extract lyrics from audio** button runs your uploaded song through Whisper
-(`fal-ai/whisper`), entirely in the browser with **your** fal.ai key:
+Three ways to get lyrics in — pick whichever suits the song:
 
-- Your key is typed into the app and lives **only** in your browser's localStorage —
-  it is never committed to the repo or sent anywhere but fal.ai.
-- Transcription bills to your fal.ai account.
-- Sung vocals over music transcribe imperfectly — every line stays editable, fix by hand.
+1. **Transcribe in the app** — the **Extract lyrics from audio** button runs Whisper
+   directly in your browser (via transformers.js) — no key, no account, no cost.
+   It maps each timed line onto your intervals.
+2. **Transcribe free in Colab** — the button in Step 1 opens the
+   `song-transcriber.ipynb` notebook in Google Colab, where the open-source Whisper
+   model runs on a free GPU. Upload your song, get timestamped lyrics back in about
+   a minute, then paste them into the Lyrics box.
+3. **Type or paste them yourself** — the Lyrics box in Step 1 is a plain editable
+   field. Paste from anywhere or type them in by hand; the app slices them across
+   your intervals either way.
+
+Whisper transcribes sung vocals over music imperfectly no matter which route you
+take — every line stays editable, fix by hand.
 
 ## Image generation
 
