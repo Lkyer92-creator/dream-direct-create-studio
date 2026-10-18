@@ -1,43 +1,51 @@
 # 🎬 DDC Studio — Dream Direct Create Studio
 
 A director's studio that turns your finished song into a full music video, built scene by
-scene — with **free in-app image generation** powered by Pollinations.ai, plus
-**automatic lyric transcription** straight from your uploaded audio.
+scene — a **prompt-only** workflow. The app writes every prompt; you generate the images
+in Fooocus and the motion in your own video generator, then bring the results back in
+for assembly.
 
-Upload your audio, slice it into timed intervals (10/15/20/30s or custom), generate a theme
-and storyline, storyboard one visual per interval, and get a complete Bible for every scene —
-timestamp, lyrics, the actual generated visual, and a full production prompt (character,
-scene, camera angle, camera movement, lip-sync directions) ready to paste into Runway.
-Then assemble the finished video: upload your clips per scene and the app trims, syncs,
-and exports it all with your song underneath.
+Upload your audio, slice it into timed intervals (10/15/20/30s or custom), label each
+section (Verse 1, Chorus, Break...), generate a theme and storyline, and get a text-to-image
+prompt for every scene at once — copy them all, run them through Fooocus, upload the
+images back, review your storyboard, and get a Bible of image + prompt pairs ready to
+paste into your video generator. Then upload your finished clips per scene and the app
+trims, syncs, and exports the whole video with your song underneath.
 
-**Images only** — there is no video generator in this build. You direct, the app handles
-visuals and prompts, and you render motion clips in Runway (or your tool of choice) with
-the prompts it writes for you.
+**No image generator, no video generator in this build — by design.** The app directs
+and organizes; Fooocus and your video tool render.
 
 Built with **Vite + React** (single-page app), **Tailwind CSS**, and **lucide-react**.
 
 ## The Director flow
 
-A guided 6-step wizard (the **Director** tab):
+A guided 9-step wizard (the **Director** tab):
 
 1. **Audio** — upload your song (MP3/WAV/M4A). Real duration via the Web Audio API, real
-   waveform from the decoded audio. **Extract lyrics from audio** runs it through
-   Whisper transcription and maps each timed line onto your intervals — every line stays
-   editable. You can also pick a song from your Audio library instead of re-uploading.
+   waveform from the decoded audio. Get lyrics three free ways: transcribe in the app,
+   transcribe free in Colab, or type/paste them yourself. You can also pick a song from
+   your Audio library instead of re-uploading.
 2. **Intervals** — slice the song into timestamped segments: 10, 15, 20, 30 seconds, or
    any custom length. Each interval shows its time range and lyric chunk.
-3. **Theme + Storyline** — one tap generates a visual theme and a storyline for your
+3. **Sections** — label what each segment actually is: Verse 1, Verse 1a, Verse 1b,
+   Chorus, Break, Instrumental, Outro, and more — or type your own. The auto-guess is
+   just a starting point; override anything.
+4. **Theme + Storyline** — one tap generates a visual theme and a storyline for your
    video (free, via Pollinations text AI), dropped into editable fields. Rewrite anything —
-   this guides every visual and the Bible.
-4. **Storyboard** — one AI visual per interval (Pollinations Flux, 9:16), generated with
-   your locked character, style, palette, and world baked in. Generate all at once or
-   re-roll per scene. Each scene has a **lip-sync toggle** for close-up singing shots.
-5. **Bible** — one card per scene: timestamp, lyrics, the actual generated image, and a
-   full editable production prompt covering character, scene + action, camera angle,
-   camera movement, lighting/mood, palette, and explicit lip-sync directions quoting the
-   lyric chunk on lip-sync scenes. Copy per scene, or copy all prompts at once.
-6. **Finished** — upload your own video clip per scene; clips auto-place at their scene
+   this guides every prompt and the Bible.
+5. **Image prompts** — one editable text-to-image prompt per scene, compiled from your
+   locked character, style, palette, world, and storyline. **Copy ALL image prompts**
+   grabs every scene's prompt in one block — paste into Fooocus and generate.
+6. **Upload images** — bring your Fooocus results back in, one image per scene. Stored
+   in the app so they survive reloads and project switches.
+7. **Storyboard** — review space: each scene shows its uploaded image plus the video
+   concept. **Approve** or **Veto** each scene, edit anything, until the board looks
+   right.
+8. **Bible** — alternating Image / Prompt pairs per scene: the image, then its full
+   editable production prompt (character, scene + action, camera angle, camera movement,
+   lighting/mood, lip-sync directions on flagged scenes). Copy per scene or copy all —
+   paste straight into your video generator.
+9. **Finished** — upload your finished video clip per scene; clips auto-place at their scene
    timestamps, get trimmed/looped to fit, and export as one finished MP4 with your song
    mixed underneath (rendered right in the browser with ffmpeg.wasm).
 
@@ -51,8 +59,8 @@ A guided 6-step wizard (the **Director** tab):
 - **Timeline** — waveform, tap-to-play any segment with loop, rename segments.
 - **Scenes** — per-scene editor: shot type, camera angle + movement, character action,
   setting, lighting/mood, lyric line.
-- **Characters** — preset character library: name, face, hair, outfit, style notes, and
-  free AI-generated portraits. Save once, pull into any project's cast.
+- **Characters** — preset character library: name, face, hair, outfit, style notes.
+  Save once, pull into any project's cast. Portraits are your own uploads.
 - **Audio** — your full-length songs, stored in the app (IndexedDB) so projects reuse
   them with no re-uploading.
 - **Looks** — one-tap saved visual styles: palette + film style + world + character.
@@ -80,10 +88,10 @@ take — every line stays editable, fix by hand.
 
 ## Image generation
 
-All visuals are generated in-app with the free Pollinations.ai image API
-(`image.pollinations.ai`, Flux model) — no key needed. Keyframes render at 720×1280
-(9:16 vertical); character portraits at 512×768. Every generation uses a fresh random
-seed; hit re-roll for a new take.
+There is none in this app — by design. The app writes text-to-image prompts (one per
+scene, plus a copy-all button); you generate the images in Fooocus (see
+`fooocus-colab.ipynb` — runs free on a Colab GPU, controlled from your phone) and
+upload them back into the app per scene.
 
 ## Run it locally
 
@@ -105,10 +113,10 @@ Live at **lkyer92-creator.github.io/dream-direct-create-studio/**.
 
 ## Honest notes
 
-- There is **no video generator** in this app — by design. It writes you the prompts;
-  you render the motion in Runway or your own tool.
-- Pollinations is free with rate limits — generating a full storyboard takes a minute or
-  two; scenes generate one at a time.
+- There is **no image or video generator** in this app — by design. It writes you the
+  prompts; you render images in Fooocus and motion in your own video tool.
+- The theme + storyline writer uses the free Pollinations text API (rate-limited, but
+  it's one call per project).
 - Transcription is a starting point — sung vocals over music transcribe imperfectly, so
   every transcribed line stays editable.
 - Projects, characters, looks, and settings auto-save in your browser (localStorage);
