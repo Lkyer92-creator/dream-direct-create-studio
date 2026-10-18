@@ -4,6 +4,7 @@ import {
   ChevronRight, Clapperboard, Video, RefreshCw, Scissors, Zap, X,
   MonitorPlay, FastForward, DownloadCloud, Cpu, CheckCircle, Upload,
   Key, Mic, Clock, AlertTriangle, Loader2, Trash2, Eye, Plus, Wand2, FileAudio, BookOpen,
+  Layers, Users, AudioLines, Palette,
 } from 'lucide-react';
 
 /* ============================== FAL.AI CONFIG ============================== */
@@ -19,6 +20,10 @@ const FFMPEG_WASM_URL = `https://cdn.jsdelivr.net/npm/@ffmpeg/core@${FFMPEG_CORE
 
 const LS_KEY = 'ddc_studio_fal_key';
 const LS_PROJECT = 'ddc_studio_project_v1';
+const LS_INDEX = 'ddc_projects_v1';
+const LS_PROJECT_PREFIX = 'ddc_project_';
+const LS_CHARACTERS = 'ddc_characters_v1';
+const LS_LOOKS = 'ddc_looks_v1';
 
 /* ============================== FAL.AI HELPERS ============================== */
 async function falPost(endpoint, key, body) {
@@ -147,6 +152,49 @@ function parseThemeStoryline(content) {
   return { theme: '', storyline: String(content).trim() };
 }
 
+/* ============================== INDEXEDDB AUDIO LIBRARY ============================== */
+// Full-length songs persist here as blobs so projects can reuse them without re-uploading.
+// localStorage can't hold multi-MB audio — IndexedDB can.
+const IDB_DB = 'ddc-studio-audio';
+const IDB_STORE = 'songs';
+let _idbPromise = null;
+function idbOpen() {
+  if (_idbPromise) return _idbPromise;
+  _idbPromise = new Promise((resolve, reject) => {
+    try {
+      if (!('indexedDB' in window)) return reject(new Error('IndexedDB unavailable'));
+      const req = indexedDB.open(IDB_DB, 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore(IDB_STORE, { keyPath: 'id' }); };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('IDB open failed'));
+    } catch (e) { reject(e); }
+  });
+  return _idbPromise;
+}
+function idbStore(mode) {
+  return idbOpen().then(db => db.transaction(IDB_STORE, mode).objectStore(IDB_STORE));
+}
+async function idbPutSong(song) {
+  const s = await idbStore('readwrite');
+  return new Promise((res, rej) => { const r = s.put(song); r.onsuccess = () => res(); r.onerror = () => rej(r.error); });
+}
+async function idbListSongs() {
+  const s = await idbStore('readonly');
+  return new Promise((res, rej) => {
+    const r = s.getAll();
+    r.onsuccess = () => res((r.result || []).map(x => ({ id: x.id, name: x.name, duration: x.duration, addedAt: x.addedAt })));
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbGetSong(id) {
+  const s = await idbStore('readonly');
+  return new Promise((res, rej) => { const r = s.get(id); r.onsuccess = () => res(r.result || null); r.onerror = () => rej(r.error); });
+}
+async function idbDeleteSong(id) {
+  const s = await idbStore('readwrite');
+  return new Promise((res, rej) => { const r = s.delete(id); r.onsuccess = () => res(); r.onerror = () => rej(r.error); });
+}
+
 /* ============================== AUDIO HELPERS ============================== */
 async function decodeAudioFile(file) {
   const AC = window.AudioContext || window.webkitAudioContext;
@@ -232,13 +280,14 @@ function defaultEnergy(title) {
   return 5;
 }
 
-/* Director wizard steps: 1 Audio -> 2 Intervals -> 3 Theme -> 4 Storyboard -> 5 Bible */
+/* Director wizard steps: 1 Audio -> 2 Intervals -> 3 Theme -> 4 Storyboard -> 5 Bible -> 6 Finished */
 const DIRECTOR_STEPS = [
   { key: 'audio', label: 'Audio' },
   { key: 'intervals', label: 'Intervals' },
   { key: 'theme', label: 'Theme' },
   { key: 'storyboard', label: 'Storyboard' },
   { key: 'bible', label: 'Bible' },
+  { key: 'finished', label: 'Finished' },
 ];
 
 /* ============================== MAIN COMPONENT ============================== */
@@ -265,6 +314,82 @@ function loadSavedProject() {
   } catch (e) { return null; }
 }
 
+/* ============================== PROJECTS (multi-project store) ============================== */
+// One project = one complete music video: its own song, cast, scenes, storyboard, Bible.
+function loadProjectRecord(id) {
+  try {
+    const raw = localStorage.getItem(LS_PROJECT_PREFIX + id);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+function saveProjectRecord(rec) {
+  try { localStorage.setItem(LS_PROJECT_PREFIX + rec.id, JSON.stringify(rec)); } catch (e) { /* non-fatal */ }
+}
+function seedCast() {
+  return DEFAULT_CHARACTERS.map(c => ({ ...c }));
+}
+function defaultLook() {
+  return { characterId: 'char-1', paletteId: 'pal-1', styleId: 'sty-1', themeId: 'thm-1' };
+}
+function blankRecord(id, name) {
+  const now = Date.now();
+  return {
+    id, name, createdAt: now, updatedAt: now,
+    project: { title: name, artist: '', intervalSeconds: 15, customSeconds: 20, themeText: '', storylineText: '' },
+    lyricsText: '', scenes: [],
+    audioSongId: null, audioName: '', audioDuration: 0,
+    cast: seedCast(), look: defaultLook(),
+  };
+}
+function writeIndex(index) {
+  try { localStorage.setItem(LS_INDEX, JSON.stringify(index)); } catch (e) { /* non-fatal */ }
+}
+// First load: if no project index exists, migrate the old single saved project into "Project 1".
+function initializeProjects() {
+  let index = null;
+  try { const raw = localStorage.getItem(LS_INDEX); index = raw ? JSON.parse(raw) : null; } catch (e) { index = null; }
+  if (Array.isArray(index) && index.length) {
+    index.sort((a, b) => (b.lastOpened || 0) - (a.lastOpened || 0));
+    let active = loadProjectRecord(index[0].id);
+    if (!active) { active = blankRecord(index[0].id, index[0].name || 'Project 1'); saveProjectRecord(active); }
+    return { index, activeId: index[0].id, active };
+  }
+  const old = loadSavedProject();
+  const rec = blankRecord('p' + Date.now().toString(36), 'Project 1');
+  if (old) {
+    rec.project = {
+      title: old.title || 'Untitled Single', artist: old.artist || '',
+      intervalSeconds: old.intervalSeconds || 15, customSeconds: old.customSeconds || 20,
+      themeText: old.themeText || '', storylineText: old.storylineText || '',
+    };
+    rec.lyricsText = old.lyricsText || '';
+    rec.scenes = Array.isArray(old.scenes) ? old.scenes : [];
+  }
+  saveProjectRecord(rec);
+  const idx = [{
+    id: rec.id, name: rec.name, songTitle: rec.project.title, sceneCount: rec.scenes.length,
+    lastOpened: Date.now(), createdAt: rec.createdAt, updatedAt: rec.updatedAt,
+  }];
+  writeIndex(idx);
+  return { index: idx, activeId: rec.id, active: rec };
+}
+function loadCharacterPresets() {
+  try {
+    const raw = localStorage.getItem(LS_CHARACTERS);
+    const arr = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(arr) && arr.length) return arr;
+  } catch (e) { /* fall through */ }
+  return seedCast();
+}
+function loadLooks() {
+  try {
+    const raw = localStorage.getItem(LS_LOOKS);
+    const arr = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(arr)) return arr;
+  } catch (e) { /* fall through */ }
+  return [];
+}
+
 export default function DDCDirectorStudio() {
   const [activeTab, setActiveTab] = useState('timeline');
 
@@ -273,17 +398,23 @@ export default function DDCDirectorStudio() {
   const [showKey, setShowKey] = useState(false);
   const [keySavedTick, setKeySavedTick] = useState(false);
 
-  const saved = useRef(loadSavedProject()).current;
+  const bootRef = useRef(null);
+  if (bootRef.current === null) bootRef.current = initializeProjects();
+  const boot = bootRef.current;
 
-  const [project, setProject] = useState({
-    title: (saved && saved.title) || 'Untitled Single',
-    artist: (saved && saved.artist) || '',
-    intervalSeconds: (saved && saved.intervalSeconds) || 15,
-    customSeconds: (saved && saved.customSeconds) || 20,
-    themeText: (saved && saved.themeText) || '',
-    storylineText: (saved && saved.storylineText) || '',
+  const [activeProject, setActiveProject] = useState({ id: boot.activeId, name: boot.active.name, createdAt: boot.active.createdAt });
+  const [projectIndex, setProjectIndex] = useState(boot.index);
+
+  const [project, setProject] = useState(boot.active.project);
+  const [lyricsText, setLyricsText] = useState(boot.active.lyricsText || '');
+  // Per-project cast + locked look — each video gets its own people and aesthetic.
+  const [cast, setCast] = useState(Array.isArray(boot.active.cast) && boot.active.cast.length ? boot.active.cast : seedCast());
+  const [look, setLook] = useState(boot.active.look || defaultLook());
+  const [audioMeta, setAudioMeta] = useState({
+    songId: boot.active.audioSongId || null,
+    name: boot.active.audioName || '',
+    duration: boot.active.audioDuration || 0,
   });
-  const [lyricsText, setLyricsText] = useState((saved && saved.lyricsText) || '');
 
   // Real audio state
   const [audio, setAudio] = useState(null); // { name, url, duration, peaks }
@@ -293,13 +424,17 @@ export default function DDCDirectorStudio() {
   const audioRef = useRef(null);
   const playRangeRef = useRef(null);
 
-  const [characters, setCharacters] = useState(DEFAULT_CHARACTERS);
+  // Global shared libraries (feed every project)
+  const [characterPresets, setCharacterPresets] = useState(loadCharacterPresets);
+  const [looks, setLooks] = useState(loadLooks);
+  const [songLibrary, setSongLibrary] = useState([]);
+  const [idbReady, setIdbReady] = useState(false);
+
   const [palettes] = useState(DEFAULT_PALETTES);
   const [styles] = useState(DEFAULT_STYLES);
   const [themes] = useState(DEFAULT_THEMES);
-  const [lockedAssets] = useState({ characterId: 'char-1', paletteId: 'pal-1', styleId: 'sty-1', themeId: 'thm-1' });
 
-  const [segments, setSegments] = useState((saved && Array.isArray(saved.scenes)) ? saved.scenes : []);
+  const [segments, setSegments] = useState(Array.isArray(boot.active.scenes) ? boot.active.scenes : []);
   const [selectedSceneIndex, setSelectedSceneIndex] = useState(0);
   const [sortByEnergy, setSortByEnergy] = useState(false);
 
@@ -335,16 +470,29 @@ export default function DDCDirectorStudio() {
   const canvasRef = useRef(null);
   const copyTimerRef = useRef(null);
 
-  const lockedChar = characters.find(c => c.id === lockedAssets.characterId) || characters[0];
-  const lockedPalette = palettes.find(p => p.id === lockedAssets.paletteId) || palettes[0];
-  const lockedStyle = styles.find(s => s.id === lockedAssets.styleId) || styles[0];
-  const lockedTheme = themes.find(t => t.id === lockedAssets.themeId) || themes[0];
+  const [showCastPicker, setShowCastPicker] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [renamingId, setRenamingId] = useState(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [charForm, setCharForm] = useState(null); // null | {id?, name, face, hair, outfit, styleNotes, imageUrl}
+  const [lookName, setLookName] = useState('');
+
+  const charFallback = { id: 'char-fallback', name: 'Lead', face: 'lead performer', hair: '', outfit: 'stage outfit', imageUrl: '' };
+  const lockedChar = cast.find(c => c.id === look.characterId) || cast[0] || charFallback;
+  const lockedPalette = palettes.find(p => p.id === look.paletteId) || palettes[0];
+  const lockedStyle = styles.find(s => s.id === look.styleId) || styles[0];
+  const lockedTheme = themes.find(t => t.id === look.themeId) || themes[0];
   const locked = { char: lockedChar, palette: lockedPalette, style: lockedStyle, theme: lockedTheme };
 
-  /* ------------------------- persistence ------------------------- */
-  const persist = (nextProject, nextLyrics, nextSegments) => {
+  /* ------------------------- persistence (per active project) ------------------------- */
+  const writeActiveProject = (p, lyrics, segs, castOv, lookOv, audioOv) => {
+    const id = activeProject.id;
+    if (!id) return;
+    const cst = castOv || cast;
+    const lk = lookOv || look;
+    const am = audioOv || audioMeta;
     try {
-      const scenes = (nextSegments || segments).map(s => ({
+      const scenes = (segs || segments).map(s => ({
         id: s.id, sceneNumber: s.sceneNumber, title: s.title,
         startTime: s.startTime, endTime: s.endTime, duration: s.duration,
         energyLevel: s.energyLevel, lyrics: s.lyrics,
@@ -357,13 +505,324 @@ export default function DDCDirectorStudio() {
         videoGen: s.videoGen && s.videoGen.status === 'done' ? { status: 'done', url: s.videoGen.url } : { status: 'idle' },
         trimStart: s.trimStart, trimEnd: s.trimEnd,
       }));
-      localStorage.setItem(LS_PROJECT, JSON.stringify({
-        title: nextProject.title, artist: nextProject.artist,
-        intervalSeconds: nextProject.intervalSeconds, customSeconds: nextProject.customSeconds,
-        themeText: nextProject.themeText || '', storylineText: nextProject.storylineText || '',
-        lyricsText: nextLyrics, scenes,
-      }));
+      saveProjectRecord({
+        id, name: activeProject.name, createdAt: activeProject.createdAt, updatedAt: Date.now(),
+        project: {
+          title: p.title, artist: p.artist,
+          intervalSeconds: p.intervalSeconds, customSeconds: p.customSeconds,
+          themeText: p.themeText || '', storylineText: p.storylineText || '',
+        },
+        lyricsText: lyrics, scenes,
+        audioSongId: am.songId, audioName: am.name, audioDuration: am.duration,
+        cast: cst, look: lk,
+      });
+      setProjectIndex(prev => {
+        const next = prev.map(e => e.id === id
+          ? { ...e, songTitle: p.title, sceneCount: (segs || segments).length, updatedAt: Date.now(), lastOpened: Date.now() }
+          : e);
+        writeIndex(next);
+        return next;
+      });
     } catch (e) { /* storage full or unavailable — non-fatal */ }
+  };
+  // Back-compat signature used across the app: persist(project, lyrics, segments)
+  const persist = (nextProject, nextLyrics, nextSegments) => {
+    writeActiveProject(nextProject, nextLyrics, nextSegments);
+  };
+  const writeCast = (c) => { setCast(c); writeActiveProject(project, lyricsText, segments, c, null, null); };
+  const writeLook = (l) => { setLook(l); writeActiveProject(project, lyricsText, segments, null, l, null); };
+
+  /* ------------------------- projects: open / new / rename / duplicate / delete ------------------------- */
+  const openProject = async (id, saveFirst = true) => {
+    if (id === activeProject.id) return;
+    if (saveFirst) writeActiveProject(project, lyricsText, segments);
+    const rec = loadProjectRecord(id);
+    if (!rec) return;
+    pauseAudio();
+    if (audio && audio.url) { try { URL.revokeObjectURL(audio.url); } catch (e) {} }
+    audioFileRef.current = null;
+    setAudio(null);
+    setActiveProject({ id: rec.id, name: rec.name, createdAt: rec.createdAt });
+    setProject(rec.project);
+    setLyricsText(rec.lyricsText || '');
+    setSegments(Array.isArray(rec.scenes) ? rec.scenes : []);
+    setCast(Array.isArray(rec.cast) && rec.cast.length ? rec.cast : seedCast());
+    setLook(rec.look || defaultLook());
+    const am = { songId: rec.audioSongId || null, name: rec.audioName || '', duration: rec.audioDuration || 0 };
+    setAudioMeta(am);
+    setSelectedSceneIndex(0);
+    setDirectorStep(1);
+    setCurrentTime(0);
+    setShowCastPicker(false);
+    setProjectIndex(prev => {
+      const next = prev.map(e => e.id === id ? { ...e, lastOpened: Date.now() } : e);
+      next.sort((a, b) => b.lastOpened - a.lastOpened);
+      writeIndex(next);
+      return next;
+    });
+    // Re-attach the project's song from the audio library if it's there.
+    // Scenes already match it — no reslice, just restore playback.
+    if (rec.audioSongId && idbReady) {
+      try {
+        const song = await idbGetSong(rec.audioSongId);
+        if (song && song.blob) {
+          const file = new File([song.blob], song.name, { type: song.blob.type || 'audio/mpeg' });
+          loadAudioIntoSession(file, { songId: song.id, name: song.name, duration: song.duration, peaks: song.peaks }, false);
+        }
+      } catch (e) { /* song not in library — user can re-upload */ }
+    }
+  };
+
+  const createProject = (name) => {
+    writeActiveProject(project, lyricsText, segments);
+    const id = 'p' + Date.now().toString(36);
+    const rec = blankRecord(id, (name || '').trim() || `Project ${projectIndex.length + 1}`);
+    saveProjectRecord(rec);
+    const entry = {
+      id: rec.id, name: rec.name, songTitle: rec.project.title, sceneCount: 0,
+      lastOpened: Date.now(), createdAt: rec.createdAt, updatedAt: rec.updatedAt,
+    };
+    setProjectIndex(prev => { const next = [entry, ...prev]; writeIndex(next); return next; });
+    pauseAudio();
+    if (audio && audio.url) { try { URL.revokeObjectURL(audio.url); } catch (e) {} }
+    audioFileRef.current = null;
+    setAudio(null);
+    setActiveProject({ id: rec.id, name: rec.name, createdAt: rec.createdAt });
+    setProject(rec.project);
+    setLyricsText('');
+    setSegments([]);
+    setCast(seedCast());
+    setLook(defaultLook());
+    setAudioMeta({ songId: null, name: '', duration: 0 });
+    setSelectedSceneIndex(0);
+    setDirectorStep(1);
+    setCurrentTime(0);
+    setShowCastPicker(false);
+    setActiveTab('director');
+  };
+
+  const renameProject = (id, name) => {
+    const clean = (name || '').trim() || 'Untitled project';
+    if (id === activeProject.id) setActiveProject(prev => ({ ...prev, name: clean }));
+    const rec = loadProjectRecord(id);
+    if (rec) { rec.name = clean; rec.updatedAt = Date.now(); saveProjectRecord(rec); }
+    setProjectIndex(prev => {
+      const next = prev.map(e => e.id === id ? { ...e, name: clean, updatedAt: Date.now() } : e);
+      writeIndex(next);
+      return next;
+    });
+  };
+
+  const duplicateProject = (id) => {
+    writeActiveProject(project, lyricsText, segments);
+    const rec = loadProjectRecord(id);
+    if (!rec) return;
+    const nid = 'p' + Date.now().toString(36);
+    const copy = JSON.parse(JSON.stringify(rec));
+    copy.id = nid;
+    copy.name = rec.name + ' (copy)';
+    copy.createdAt = Date.now();
+    copy.updatedAt = Date.now();
+    saveProjectRecord(copy);
+    const entry = {
+      id: nid, name: copy.name, songTitle: copy.project.title, sceneCount: copy.scenes.length,
+      lastOpened: Date.now(), createdAt: copy.createdAt, updatedAt: copy.updatedAt,
+    };
+    setProjectIndex(prev => { const next = [entry, ...prev]; writeIndex(next); return next; });
+  };
+
+  const deleteProject = (id) => {
+    if (projectIndex.length <= 1) { window.alert('Keep at least one project — make a new one first if you want to delete this.'); return; }
+    if (!window.confirm('Delete this project for good? This cannot be undone.')) return;
+    const next = projectIndex.filter(e => e.id !== id);
+    try { localStorage.removeItem(LS_PROJECT_PREFIX + id); } catch (e) {}
+    writeIndex(next);
+    setProjectIndex(next);
+    if (id === activeProject.id) openProject(next[0].id, false);
+  };
+
+  /* ------------------------- audio library (IndexedDB) ------------------------- */
+  const refreshSongLibrary = async () => {
+    if (!idbReady) return;
+    try {
+      const list = await idbListSongs();
+      list.sort((a, b) => b.addedAt - a.addedAt);
+      setSongLibrary(list);
+    } catch (e) { /* non-fatal */ }
+  };
+
+  const loadAudioIntoSession = (file, meta, doReslice = true) => {
+    const url = URL.createObjectURL(file);
+    if (audio && audio.url) { try { URL.revokeObjectURL(audio.url); } catch (e) {} }
+    audioFileRef.current = file;
+    setAudio({ name: meta.name, url, duration: meta.duration, peaks: meta.peaks });
+    const am = { songId: meta.songId || null, name: meta.name, duration: meta.duration };
+    setAudioMeta(am);
+    setCurrentTime(0);
+    // When re-attaching a project's own song (project switch / reload), the saved
+    // scenes already match it — don't reslice, just restore playback.
+    if (doReslice) reslice(meta.duration, currentInterval(), lyricsText, segments);
+    return am;
+  };
+
+  const loadLibrarySong = async (id) => {
+    try {
+      const song = await idbGetSong(id);
+      if (!song || !song.blob) { setAudioError('Could not load that song from the library.'); return; }
+      pauseAudio();
+      const file = new File([song.blob], song.name, { type: song.blob.type || 'audio/mpeg' });
+      const am = loadAudioIntoSession(file, { songId: song.id, name: song.name, duration: song.duration, peaks: song.peaks });
+      writeActiveProject(project, lyricsText, segments, null, null, am);
+    } catch (e) { setAudioError('Could not load that song from the library.'); }
+  };
+
+  const addSongToLibrary = async (file) => {
+    if (!file || !idbReady) return;
+    try {
+      const { duration, peaks } = await decodeAudioFile(file);
+      await idbPutSong({ id: 's' + Date.now().toString(36), name: file.name, duration, peaks, addedAt: Date.now(), blob: file });
+      refreshSongLibrary();
+    } catch (e) { setAudioError(e.message || 'Could not add that song.'); }
+  };
+
+  const deleteLibrarySong = async (id) => {
+    if (!window.confirm('Delete this song from your library? Projects using it will need it re-uploaded.')) return;
+    try { await idbDeleteSong(id); } catch (e) {}
+    refreshSongLibrary();
+    if (audioMeta.songId === id) {
+      const am = { songId: null, name: audioMeta.name, duration: audioMeta.duration };
+      setAudioMeta(am);
+      writeActiveProject(project, lyricsText, segments, null, null, am);
+    }
+  };
+
+  // Boot the audio library; auto-load this project's song if it's stored.
+  useEffect(() => {
+    let cancelled = false;
+    idbOpen().then(async () => {
+      if (cancelled) return;
+      setIdbReady(true);
+      try {
+        const list = await idbListSongs();
+        if (!cancelled) { list.sort((a, b) => b.addedAt - a.addedAt); setSongLibrary(list); }
+      } catch (e) { /* non-fatal */ }
+      const sid = boot.active.audioSongId;
+      if (sid && !cancelled) {
+        try {
+          const song = await idbGetSong(sid);
+          if (song && song.blob && !cancelled) {
+            const file = new File([song.blob], song.name, { type: song.blob.type || 'audio/mpeg' });
+            loadAudioIntoSession(file, { songId: song.id, name: song.name, duration: song.duration, peaks: song.peaks }, false);
+          }
+        } catch (e) { /* song not in library — user can re-upload */ }
+      }
+    }).catch(() => { if (!cancelled) setIdbReady(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  /* ------------------------- project cast (per-project characters) ------------------------- */
+  const addPresetToCast = (preset) => {
+    if (cast.some(c => c.presetId === preset.id)) return;
+    const copy = { ...preset, id: 'c' + Date.now().toString(36), presetId: preset.id };
+    writeCast([...cast, copy]);
+  };
+  const removeFromCast = (charId) => {
+    if (cast.length <= 1) return;
+    if (!window.confirm('Remove this character from this project?')) return;
+    const next = cast.filter(c => c.id !== charId);
+    const l = look.characterId === charId ? { ...look, characterId: next[0].id } : look;
+    setCast(next);
+    setLook(l);
+    writeActiveProject(project, lyricsText, segments, next, l, null);
+  };
+  const saveCastToLibrary = (char) => {
+    if (characterPresets.some(p => p.name === char.name && p.face === char.face)) return;
+    const preset = {
+      id: 'ch' + Date.now().toString(36), name: char.name, face: char.face, hair: char.hair,
+      outfit: char.outfit, styleNotes: char.styleNotes || '', imageUrl: char.imageUrl || '',
+    };
+    const next = [preset, ...characterPresets];
+    setCharacterPresets(next);
+    try { localStorage.setItem(LS_CHARACTERS, JSON.stringify(next)); } catch (e) {}
+  };
+
+  /* ------------------------- character presets (global library) ------------------------- */
+  const savePresetForm = () => {
+    if (!charForm || !charForm.name.trim()) return;
+    let next;
+    if (charForm.id) {
+      next = characterPresets.map(p => p.id === charForm.id ? { ...p, ...charForm } : p);
+    } else {
+      next = [{
+        id: 'ch' + Date.now().toString(36), name: charForm.name.trim(),
+        face: charForm.face || '', hair: charForm.hair || '', outfit: charForm.outfit || '',
+        styleNotes: charForm.styleNotes || '', imageUrl: charForm.imageUrl || '',
+      }, ...characterPresets];
+    }
+    setCharacterPresets(next);
+    try { localStorage.setItem(LS_CHARACTERS, JSON.stringify(next)); } catch (e) {}
+    setCharForm(null);
+  };
+  const deletePreset = (id) => {
+    if (!window.confirm('Delete this character preset?')) return;
+    const next = characterPresets.filter(p => p.id !== id);
+    setCharacterPresets(next);
+    try { localStorage.setItem(LS_CHARACTERS, JSON.stringify(next)); } catch (e) {}
+  };
+  // "Use" drops the preset into the open project's cast and makes it the star.
+  const usePreset = (preset) => {
+    let c = cast.find(x => x.presetId === preset.id);
+    let nextCast = cast;
+    if (!c) {
+      c = { ...preset, id: 'c' + Date.now().toString(36), presetId: preset.id };
+      nextCast = [...cast, c];
+      setCast(nextCast);
+    }
+    const l = { ...look, characterId: c.id };
+    setLook(l);
+    writeActiveProject(project, lyricsText, segments, nextCast, l, null);
+  };
+  const handleGeneratePresetPortrait = (presetId, charPrompt) => {
+    setGeneratingPortraitId(presetId);
+    const seed = Math.floor(Math.random() * 100000);
+    const portraitUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(
+      `cinematic character portrait, ${charPrompt}, highly detailed, sharp focus, 8k, masterpiece`
+    )}?width=512&height=768&model=flux&seed=${seed}&nologo=true`;
+    const img = new Image();
+    img.src = portraitUrl;
+    img.onload = () => {
+      const next = characterPresets.map(c => c.id === presetId ? { ...c, imageUrl: portraitUrl } : c);
+      setCharacterPresets(next);
+      try { localStorage.setItem(LS_CHARACTERS, JSON.stringify(next)); } catch (e) {}
+      setGeneratingPortraitId(null);
+    };
+    img.onerror = () => { setGeneratingPortraitId(null); };
+  };
+
+  /* ------------------------- saved looks (global style presets) ------------------------- */
+  const saveCurrentLook = () => {
+    const name = lookName.trim() || `Look ${looks.length + 1}`;
+    const entry = {
+      id: 'l' + Date.now().toString(36), name,
+      paletteId: look.paletteId, styleId: look.styleId, themeId: look.themeId, characterId: look.characterId,
+    };
+    const next = [entry, ...looks];
+    setLooks(next);
+    try { localStorage.setItem(LS_LOOKS, JSON.stringify(next)); } catch (e) {}
+    setLookName('');
+  };
+  const applyLook = (entry) => {
+    const l = {
+      paletteId: entry.paletteId, styleId: entry.styleId, themeId: entry.themeId,
+      characterId: entry.characterId && cast.some(c => c.id === entry.characterId) ? entry.characterId : look.characterId,
+    };
+    writeLook(l);
+  };
+  const deleteLook = (id) => {
+    if (!window.confirm('Delete this look?')) return;
+    const next = looks.filter(x => x.id !== id);
+    setLooks(next);
+    try { localStorage.setItem(LS_LOOKS, JSON.stringify(next)); } catch (e) {}
   };
 
   /* ------------------------- prompt compilers ------------------------- */
@@ -455,12 +914,17 @@ export default function DDCDirectorStudio() {
     pauseAudio();
     try {
       const { duration, peaks } = await decodeAudioFile(file);
-      const url = URL.createObjectURL(file);
-      if (audio && audio.url) { try { URL.revokeObjectURL(audio.url); } catch (e) {} }
-      audioFileRef.current = file;
-      setAudio({ name: file.name, url, duration, peaks });
-      setCurrentTime(0);
-      reslice(duration, currentInterval(), lyricsText, segments);
+      // Every upload lands in the audio library too, so other projects can reuse it.
+      let songId = null;
+      if (idbReady) {
+        songId = 's' + Date.now().toString(36);
+        try {
+          await idbPutSong({ id: songId, name: file.name, duration, peaks, addedAt: Date.now(), blob: file });
+          refreshSongLibrary();
+        } catch (e) { songId = null; }
+      }
+      const am = loadAudioIntoSession(file, { songId, name: file.name, duration, peaks });
+      writeActiveProject(project, lyricsText, segments, null, null, am);
     } catch (e) {
       setAudioError(e.message || 'Could not read that audio file.');
     } finally {
@@ -714,7 +1178,9 @@ export default function DDCDirectorStudio() {
     const img = new Image();
     img.src = portraitUrl;
     img.onload = () => {
-      setCharacters(prev => prev.map(c => c.id === charId ? { ...c, imageUrl: portraitUrl } : c));
+      const next = cast.map(c => c.id === charId ? { ...c, imageUrl: portraitUrl } : c);
+      setCast(next);
+      writeActiveProject(project, lyricsText, segments, next, null, null);
       setGeneratingPortraitId(null);
     };
     img.onerror = () => { setGeneratingPortraitId(null); };
@@ -929,6 +1395,7 @@ export default function DDCDirectorStudio() {
     if (step <= 1) return true;
     if (step === 2) return !!audio;
     if (step === 3) return segments.length > 0;
+    if (step === 6) return segments.length > 0 && !!audio;
     return hasTheme; // steps 4 + 5
   };
   const maxDirectorStep = DIRECTOR_STEPS.map((_, i) => i + 1).filter(directorUnlocked).length;
@@ -1537,6 +2004,22 @@ export default function DDCDirectorStudio() {
                 {audioError && (
                   <p className="text-xs text-red-400 flex items-center space-x-1.5"><AlertTriangle className="w-3.5 h-3.5" /><span>{audioError}</span></p>
                 )}
+                {idbReady && songLibrary.length > 0 && (
+                  <div className="space-y-2">
+                    <label className="text-[10px] uppercase font-bold text-slate-400">Or pick from your audio library</label>
+                    <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
+                      {songLibrary.map(s => (
+                        <div key={s.id} className="flex items-center justify-between bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2">
+                          <div className="min-w-0">
+                            <p className="text-xs font-bold text-white truncate">{s.name}</p>
+                            <p className="text-[10px] text-slate-500 font-mono">{fmtClock(s.duration)}</p>
+                          </div>
+                          <button onClick={() => loadLibrarySong(s.id)} className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1.5 rounded-lg transition flex-shrink-0 ml-2">Load</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <label className="text-[10px] uppercase font-bold text-slate-400">Lyrics</label>
@@ -1814,6 +2297,306 @@ export default function DDCDirectorStudio() {
                 )}
               </div>
             )}
+
+            {/* STEP 6 — Finished video */}
+            {shownDirectorStep === 6 && (
+              <div className="space-y-4">
+                <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg">
+                  <h2 className="text-sm font-bold text-white flex items-center space-x-2">
+                    <Clapperboard className="w-4 h-4 text-cyan-400" /><span>Step 6 — Finished video</span>
+                  </h2>
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Attach one motion clip per scene. Each clip is auto-placed at its scene timestamp, trimmed or looped to fill the interval, then your song is mixed underneath.
+                  </p>
+                </div>
+                {segments.map((s, i) => {
+                  const hasClip = !!(s.clipUrl || (s.videoGen && s.videoGen.url));
+                  return (
+                    <div key={s.id} className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3 flex items-center gap-3">
+                      <div className="w-16 flex-shrink-0">
+                        {s.keyframeImageUrl ? (
+                          <img src={s.keyframeImageUrl} alt={`Scene ${s.sceneNumber}`} className="w-full aspect-[9/16] object-cover rounded-lg border border-slate-700" />
+                        ) : (
+                          <div className="w-full aspect-[9/16] rounded-lg border border-dashed border-slate-700 bg-slate-950" />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+                          <span className="text-[10px] font-black text-slate-300">Scene {s.sceneNumber}</span>
+                          <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
+                          {hasClip ? (
+                            <span className="text-[9px] font-bold bg-emerald-950 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-800">CLIP ✓</span>
+                          ) : (
+                            <span className="text-[9px] font-bold bg-slate-800 text-slate-500 px-1.5 py-0.5 rounded border border-slate-700">no clip</span>
+                          )}
+                        </div>
+                        <p className="text-[10px] text-slate-500 mt-0.5 truncate">
+                          "{s.lyrics}" · trim {(s.trimStart || 0).toFixed(1)}s–{(s.trimEnd != null ? s.trimEnd : s.duration).toFixed(1)}s (fine-tune in Scenes)
+                        </p>
+                      </div>
+                      {hasClip ? (
+                        <button onClick={() => { removeClip(i); updateScene(i, { videoGen: { status: 'idle' } }); }} className="text-[10px] text-slate-400 hover:text-red-400 flex items-center space-x-1 flex-shrink-0">
+                          <Trash2 className="w-3 h-3" /><span>Remove</span>
+                        </button>
+                      ) : (
+                        <label className="cursor-pointer text-[10px] font-bold bg-purple-600/30 hover:bg-purple-600/50 border border-purple-500/40 text-purple-300 px-2 py-1.5 rounded-lg flex items-center space-x-1 transition flex-shrink-0">
+                          <Upload className="w-3 h-3" /><span>Clip</span>
+                          <input type="file" accept="video/*" className="hidden" onChange={(e) => handleClipUpload(i, e.target.files && e.target.files[0])} />
+                        </label>
+                      )}
+                    </div>
+                  );
+                })}
+                {!segments.length && (
+                  <p className="text-xs text-slate-500 bg-slate-900/60 border border-slate-800 rounded-xl p-4 text-center">
+                    No scenes yet — start at Step 1 with your song.
+                  </p>
+                )}
+                <button
+                  onClick={handleExportMP4}
+                  disabled={!audio || !segments.length}
+                  className="w-full text-sm font-bold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-3 rounded-xl transition flex items-center justify-center space-x-2"
+                >
+                  <DownloadCloud className="w-4 h-4" /><span>Export finished MP4</span>
+                </button>
+                <p className="text-[10px] text-slate-500 text-center">Clips and your song live in memory — re-attach them after a reload before exporting.</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ================= PROJECTS TAB ================= */}
+        {activeTab === 'projects' && (
+          <div className="space-y-4 animate-fadeIn">
+            <h2 className="text-base font-bold text-white">Projects</h2>
+            <div className="flex gap-2">
+              <input
+                type="text" value={newProjectName} onChange={(e) => setNewProjectName(e.target.value)}
+                placeholder="New video name…" onKeyDown={(e) => { if (e.key === 'Enter') { createProject(newProjectName); setNewProjectName(''); } }}
+                className="flex-1 bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-sm text-white focus:border-cyan-500 focus:outline-none"
+              />
+              <button onClick={() => { createProject(newProjectName); setNewProjectName(''); }} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-2.5 rounded-xl flex items-center space-x-1.5 transition">
+                <Plus className="w-3.5 h-3.5" /><span>New</span>
+              </button>
+            </div>
+            <div className="space-y-2.5">
+              {projectIndex.map(entry => (
+                <div key={entry.id} className={`p-3.5 rounded-2xl border transition ${entry.id === activeProject.id ? 'bg-cyan-950/30 border-cyan-800' : 'bg-slate-900/80 border-slate-800'}`}>
+                  {renamingId === entry.id ? (
+                    <div className="flex gap-2">
+                      <input
+                        autoFocus type="text" value={renameValue} onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') { renameProject(entry.id, renameValue); setRenamingId(null); } }}
+                        className="flex-1 bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                      />
+                      <button onClick={() => { renameProject(entry.id, renameValue); setRenamingId(null); }} className="text-xs font-bold bg-cyan-600 text-white px-3 py-2 rounded-lg">Save</button>
+                      <button onClick={() => setRenamingId(null)} className="text-xs font-bold bg-slate-800 text-slate-300 px-3 py-2 rounded-lg">Cancel</button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-bold text-white truncate">
+                            {entry.name}
+                            {entry.id === activeProject.id && <span className="text-[9px] font-bold bg-cyan-600 text-white px-1.5 py-0.5 rounded ml-1.5">OPEN</span>}
+                          </p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">
+                            {entry.songTitle || 'Untitled'} · {entry.sceneCount} scene{entry.sceneCount === 1 ? '' : 's'} · opened {new Date(entry.lastOpened).toLocaleDateString()}
+                          </p>
+                        </div>
+                        {entry.id !== activeProject.id && (
+                          <button onClick={() => openProject(entry.id)} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded-lg transition flex-shrink-0">Open</button>
+                        )}
+                      </div>
+                      <div className="flex gap-1.5 mt-2.5">
+                        <button onClick={() => { setRenamingId(entry.id); setRenameValue(entry.name); }} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1.5 rounded-lg transition">Rename</button>
+                        <button onClick={() => duplicateProject(entry.id)} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1.5 rounded-lg transition">Duplicate</button>
+                        <button onClick={() => deleteProject(entry.id)} className="text-[10px] font-bold bg-slate-800 hover:bg-red-900/50 text-slate-400 hover:text-red-300 px-2.5 py-1.5 rounded-lg transition">Delete</button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+            <p className="text-[10px] text-slate-500">Each project is one complete music video — its own song, cast, scenes, storyboard, Bible, and finished video. Everything auto-saves in this browser.</p>
+          </div>
+        )}
+
+        {/* ================= CHARACTERS TAB (global preset library) ================= */}
+        {activeTab === 'characters' && (
+          <div className="space-y-4 animate-fadeIn">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-bold text-white">Character library</h2>
+              <button onClick={() => setCharForm({ name: '', face: '', hair: '', outfit: '', styleNotes: '', imageUrl: '' })} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded-xl flex items-center space-x-1.5 transition">
+                <Plus className="w-3.5 h-3.5" /><span>New</span>
+              </button>
+            </div>
+            <p className="text-[10px] text-slate-500">Preset actors shared across all your videos. <span className="text-cyan-400 font-bold">Use</span> drops one into the open project as its star.</p>
+            {charForm && (
+              <div className="bg-slate-900/80 border border-cyan-900 rounded-2xl p-4 space-y-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-cyan-300">{charForm.id ? 'Edit character' : 'New character'}</h3>
+                {[['name', 'Name'], ['face', 'Face'], ['hair', 'Hair'], ['outfit', 'Outfit'], ['styleNotes', 'Style notes']].map(([k, label]) => (
+                  <div key={k}>
+                    <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">{label}</label>
+                    <input
+                      type="text" value={charForm[k]} onChange={(e) => setCharForm({ ...charForm, [k]: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                    />
+                  </div>
+                ))}
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Portrait URL</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text" value={charForm.imageUrl} onChange={(e) => setCharForm({ ...charForm, imageUrl: e.target.value })}
+                      placeholder="https://…" className="flex-1 bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                    />
+                    <button
+                      onClick={() => {
+                        const seed = Math.floor(Math.random() * 100000);
+                        const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(`cinematic character portrait, ${charForm.face}, ${charForm.hair}, wearing ${charForm.outfit}, highly detailed, sharp focus, 8k, masterpiece`)}?width=512&height=768&model=flux&seed=${seed}&nologo=true`;
+                        setCharForm({ ...charForm, imageUrl: url });
+                      }}
+                      className="text-[10px] font-bold bg-indigo-600/40 hover:bg-indigo-600/60 border border-indigo-500/40 text-indigo-200 px-2.5 py-2 rounded-lg transition flex-shrink-0"
+                    >
+                      Generate
+                    </button>
+                  </div>
+                  {charForm.imageUrl ? <img src={charForm.imageUrl} alt="" className="w-20 h-24 object-cover rounded-lg border border-slate-700 mt-2" /> : null}
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={savePresetForm} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-2 rounded-lg transition">Save</button>
+                  <button onClick={() => setCharForm(null)} className="text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 px-4 py-2 rounded-lg transition">Cancel</button>
+                </div>
+              </div>
+            )}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {characterPresets.map(p => (
+                <div key={p.id} className="p-3.5 bg-slate-900/80 border border-slate-800 rounded-xl flex gap-3">
+                  {p.imageUrl ? (
+                    <img src={p.imageUrl} alt={p.name} className="w-20 h-24 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
+                  ) : (
+                    <div className="w-20 h-24 rounded-lg bg-slate-800 border border-slate-700 flex-shrink-0" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <h4 className="text-xs font-bold text-white truncate">{p.name}</h4>
+                    <p className="text-[11px] text-slate-400 line-clamp-2 mt-1">{p.face}{p.hair ? ` · ${p.hair}` : ''}</p>
+                    <p className="text-[10px] text-slate-500 truncate mt-0.5">{p.outfit}</p>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      <button onClick={() => usePreset(p)} className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1 rounded transition">Use</button>
+                      <button
+                        onClick={() => handleGeneratePresetPortrait(p.id, `${p.face}, ${p.hair}, wearing ${p.outfit}`)}
+                        disabled={generatingPortraitId === p.id}
+                        className="text-[10px] bg-indigo-600/30 hover:bg-indigo-600/50 disabled:opacity-50 border border-indigo-500/40 text-indigo-300 px-2 py-1 rounded flex items-center space-x-1 transition"
+                      >
+                        {generatingPortraitId === p.id ? (
+                          <><RefreshCw className="w-3 h-3 animate-spin" /><span>…</span></>
+                        ) : (
+                          <><Sparkles className="w-3 h-3" /><span>Portrait</span></>
+                        )}
+                      </button>
+                      <button onClick={() => setCharForm({ ...p })} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded transition">Edit</button>
+                      <button onClick={() => deletePreset(p.id)} className="text-[10px] bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-300 px-2 py-1 rounded transition">Delete</button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ================= AUDIO TAB (song library) ================= */}
+        {activeTab === 'audio' && (
+          <div className="space-y-4 animate-fadeIn">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-bold text-white">Audio library</h2>
+              <label className={`cursor-pointer text-xs font-bold text-white px-3.5 py-2 rounded-xl flex items-center space-x-1.5 transition ${idbReady ? 'bg-cyan-600 hover:bg-cyan-500' : 'bg-slate-800 opacity-50'}`}>
+                <Upload className="w-3.5 h-3.5" /><span>Add song</span>
+                <input
+                  type="file" accept="audio/*" className="hidden" disabled={!idbReady}
+                  onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) addSongToLibrary(f); e.target.value = ''; }}
+                />
+              </label>
+            </div>
+            <p className="text-[10px] text-slate-500">
+              {idbReady
+                ? 'Full-length songs live here — load any of them into the open project without re-uploading.'
+                : 'Song storage is unavailable in this browser — uploads still work in-session.'}
+            </p>
+            {audioError && (
+              <p className="text-xs text-red-400 flex items-center space-x-1.5"><AlertTriangle className="w-3.5 h-3.5" /><span>{audioError}</span></p>
+            )}
+            <div className="space-y-2">
+              {songLibrary.map(s => (
+                <div key={s.id} className={`p-3 rounded-2xl border flex items-center justify-between gap-2 ${audioMeta.songId === s.id ? 'bg-cyan-950/30 border-cyan-800' : 'bg-slate-900/80 border-slate-800'}`}>
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-white truncate">
+                      {s.name}
+                      {audioMeta.songId === s.id && <span className="text-[9px] font-bold bg-cyan-600 text-white px-1.5 py-0.5 rounded ml-1.5">IN PROJECT</span>}
+                    </p>
+                    <p className="text-[10px] text-slate-500 font-mono mt-0.5">{fmtClock(s.duration)} · added {new Date(s.addedAt).toLocaleDateString()}</p>
+                  </div>
+                  <div className="flex gap-1.5 flex-shrink-0">
+                    <button onClick={() => loadLibrarySong(s.id)} className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1.5 rounded-lg transition">Load into project</button>
+                    <button onClick={() => deleteLibrarySong(s.id)} className="text-[10px] font-bold bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-300 px-2.5 py-1.5 rounded-lg transition">
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {idbReady && songLibrary.length === 0 && (
+                <p className="text-xs text-slate-500 bg-slate-900/60 border border-slate-800 rounded-xl p-4 text-center">
+                  No songs yet — every song you upload anywhere in the app lands here automatically.
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ================= LOOKS TAB (saved style presets) ================= */}
+        {activeTab === 'looks' && (
+          <div className="space-y-4 animate-fadeIn">
+            <h2 className="text-base font-bold text-white">Saved looks</h2>
+            <p className="text-[10px] text-slate-500">Capture this project's locked look — palette, style, world — and apply it to any video in one tap.</p>
+            <div className="flex gap-2">
+              <input
+                type="text" value={lookName} onChange={(e) => setLookName(e.target.value)}
+                placeholder="Look name…" onKeyDown={(e) => { if (e.key === 'Enter') saveCurrentLook(); }}
+                className="flex-1 bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-sm text-white focus:border-cyan-500 focus:outline-none"
+              />
+              <button onClick={saveCurrentLook} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-2.5 rounded-xl flex items-center space-x-1.5 transition">
+                <Plus className="w-3.5 h-3.5" /><span>Save current</span>
+              </button>
+            </div>
+            <div className="space-y-2.5">
+              {looks.map(entry => {
+                const pal = palettes.find(p => p.id === entry.paletteId) || palettes[0];
+                const sty = styles.find(s => s.id === entry.styleId);
+                const thm = themes.find(t => t.id === entry.themeId);
+                return (
+                  <div key={entry.id} className="p-3.5 bg-slate-900/80 border border-slate-800 rounded-2xl">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-bold text-white truncate">{entry.name}</p>
+                      <div className="flex gap-1.5 flex-shrink-0">
+                        <button onClick={() => applyLook(entry)} className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1.5 rounded-lg transition">Apply</button>
+                        <button onClick={() => deleteLook(entry.id)} className="text-[10px] font-bold bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-300 px-2.5 py-1.5 rounded-lg transition">Delete</button>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 mt-2">
+                      <div className="flex gap-1 flex-shrink-0">
+                        {pal.hexes.map(h => <span key={h} className="w-6 h-6 rounded-md border border-slate-700" style={{ backgroundColor: h }} />)}
+                      </div>
+                      <p className="text-[10px] text-slate-500 truncate">{pal.name}{sty ? ` · ${sty.name}` : ''}{thm ? ` · ${thm.name}` : ''}</p>
+                    </div>
+                  </div>
+                );
+              })}
+              {looks.length === 0 && (
+                <p className="text-xs text-slate-500 bg-slate-900/60 border border-slate-800 rounded-xl p-4 text-center">
+                  No saved looks yet — dial in a vibe on the Assets tab, then save it here.
+                </p>
+              )}
+            </div>
           </div>
         )}
 
@@ -1822,37 +2605,103 @@ export default function DDCDirectorStudio() {
           <div className="space-y-5 animate-fadeIn">
             <h2 className="text-base font-bold text-white">Visual Continuity Engine</h2>
             <div className="space-y-3">
-              <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider">1. Characters / Actors</h3>
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider">1. This project's cast</h3>
+                <button onClick={() => setShowCastPicker(!showCastPicker)} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 px-2.5 py-1.5 rounded-lg flex items-center space-x-1 transition">
+                  <Plus className="w-3 h-3" /><span>{showCastPicker ? 'Close' : 'Pull from library'}</span>
+                </button>
+              </div>
+              {showCastPicker && (
+                <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                  {characterPresets.filter(p => !cast.some(c => c.presetId === p.id)).map(p => (
+                    <div key={p.id} className="flex items-center gap-2 bg-slate-950/60 border border-slate-800 rounded-xl p-2">
+                      {p.imageUrl ? (
+                        <img src={p.imageUrl} alt={p.name} className="w-10 h-12 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
+                      ) : (
+                        <div className="w-10 h-12 rounded-lg bg-slate-800 border border-slate-700 flex-shrink-0" />
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-bold text-white truncate">{p.name}</p>
+                        <p className="text-[10px] text-slate-500 truncate">{p.face}</p>
+                      </div>
+                      <button onClick={() => addPresetToCast(p)} className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1.5 rounded-lg transition flex-shrink-0">Add</button>
+                    </div>
+                  ))}
+                  {characterPresets.filter(p => !cast.some(c => c.presetId === p.id)).length === 0 && (
+                    <p className="text-[10px] text-slate-500">Everyone from your library is already in this cast. Make more on the Characters tab.</p>
+                  )}
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {characters.map(char => (
+                {cast.map(char => (
                   <div key={char.id} className="p-3.5 bg-slate-900/80 border border-slate-800 rounded-xl flex gap-3 shadow-lg">
-                    <img src={char.imageUrl} alt={char.name} className="w-20 h-24 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
+                    {char.imageUrl ? (
+                      <img src={char.imageUrl} alt={char.name} className="w-20 h-24 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
+                    ) : (
+                      <div className="w-20 h-24 rounded-lg bg-slate-800 border border-slate-700 flex-shrink-0" />
+                    )}
                     <div className="flex-1 min-w-0">
-                      <h4 className="text-xs font-bold text-white truncate">{char.name}</h4>
-                      <p className="text-[11px] text-slate-300 line-clamp-2 mt-1">{char.face}</p>
-                      <button
-                        onClick={() => handleGenerateCharacterPortrait(char.id, `${char.face}, ${char.hair}, wearing ${char.outfit}`)}
-                        disabled={generatingPortraitId === char.id}
-                        className="mt-2 text-[10px] bg-indigo-600/30 hover:bg-indigo-600/50 disabled:opacity-50 border border-indigo-500/40 text-indigo-300 px-2 py-1 rounded flex items-center space-x-1 transition"
-                      >
-                        {generatingPortraitId === char.id ? (
-                          <><RefreshCw className="w-3 h-3 animate-spin" /><span>Generating...</span></>
-                        ) : (
-                          <><Sparkles className="w-3 h-3" /><span>Re-Roll Portrait</span></>
+                      <div className="flex items-center justify-between gap-2">
+                        <h4 className="text-xs font-bold text-white truncate">{char.name}</h4>
+                        {look.characterId === char.id && (
+                          <span className="text-[9px] font-bold bg-cyan-950 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-800 flex-shrink-0">ACTIVE</span>
                         )}
-                      </button>
+                      </div>
+                      <p className="text-[11px] text-slate-300 line-clamp-2 mt-1">{char.face}</p>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        <button
+                          onClick={() => handleGenerateCharacterPortrait(char.id, `${char.face}, ${char.hair}, wearing ${char.outfit}`)}
+                          disabled={generatingPortraitId === char.id}
+                          className="text-[10px] bg-indigo-600/30 hover:bg-indigo-600/50 disabled:opacity-50 border border-indigo-500/40 text-indigo-300 px-2 py-1 rounded flex items-center space-x-1 transition"
+                        >
+                          {generatingPortraitId === char.id ? (
+                            <><RefreshCw className="w-3 h-3 animate-spin" /><span>Generating...</span></>
+                          ) : (
+                            <><Sparkles className="w-3 h-3" /><span>Re-Roll</span></>
+                          )}
+                        </button>
+                        <button onClick={() => saveCastToLibrary(char)} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded flex items-center space-x-1 transition">
+                          <Download className="w-3 h-3" /><span>Save to library</span>
+                        </button>
+                        {cast.length > 1 && (
+                          <button onClick={() => removeFromCast(char.id)} className="text-[10px] bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-300 px-2 py-1 rounded flex items-center space-x-1 transition">
+                            <Trash2 className="w-3 h-3" /><span>Remove</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ))}
               </div>
             </div>
             <div className="space-y-3">
-              <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider">2. Locked Look</h3>
-              <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 space-y-2">
-                <p className="text-xs text-slate-300"><span className="text-slate-500 font-bold">Palette:</span> {lockedPalette.name}</p>
-                <div className="flex gap-1.5">{lockedPalette.hexes.map(h => <span key={h} className="w-8 h-8 rounded-lg border border-slate-700" style={{ backgroundColor: h }} />)}</div>
-                <p className="text-xs text-slate-300"><span className="text-slate-500 font-bold">Style:</span> {lockedStyle.name}</p>
-                <p className="text-xs text-slate-300"><span className="text-slate-500 font-bold">World:</span> {lockedTheme.name}</p>
+              <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider">2. Locked Look <span className="text-slate-600 normal-case">(this project)</span></h3>
+              <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 space-y-3">
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Star character</label>
+                  <select value={look.characterId} onChange={(e) => writeLook({ ...look, characterId: e.target.value })} className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-cyan-500 focus:outline-none">
+                    {cast.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Palette</label>
+                  <select value={look.paletteId} onChange={(e) => writeLook({ ...look, paletteId: e.target.value })} className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-cyan-500 focus:outline-none">
+                    {palettes.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                  <div className="flex gap-1.5 mt-2">{lockedPalette.hexes.map(h => <span key={h} className="w-8 h-8 rounded-lg border border-slate-700" style={{ backgroundColor: h }} />)}</div>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Style</label>
+                  <select value={look.styleId} onChange={(e) => writeLook({ ...look, styleId: e.target.value })} className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-cyan-500 focus:outline-none">
+                    {styles.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">World</label>
+                  <select value={look.themeId} onChange={(e) => writeLook({ ...look, themeId: e.target.value })} className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-cyan-500 focus:outline-none">
+                    {themes.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </div>
               </div>
             </div>
             <p className="text-[10px] text-slate-500">Your project auto-saves in this browser. Re-upload your song after a reload — clips you attached need re-attaching too.</p>
@@ -1861,56 +2710,62 @@ export default function DDCDirectorStudio() {
 
       </main>
 
-      {/* MOBILE BOTTOM NAVIGATION */}
-      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-[#0a0d14]/95 backdrop-blur-lg border-t border-slate-800 px-3 py-2 flex items-center justify-around">
-        <button onClick={() => setActiveTab('director')} className={`flex flex-col items-center ${activeTab === 'director' ? 'text-cyan-400' : 'text-slate-500 hover:text-slate-300 transition'}`}>
-          <Wand2 className="w-4 h-4 mb-0.5" /><span className="text-[10px]">Director</span>
-        </button>
-        <button onClick={() => setActiveTab('timeline')} className={`flex flex-col items-center ${activeTab === 'timeline' ? 'text-cyan-400' : 'text-slate-500 hover:text-slate-300 transition'}`}>
-          <Sliders className="w-4 h-4 mb-0.5" /><span className="text-[10px]">Timeline</span>
-        </button>
-        <button onClick={() => setActiveTab('scenes')} className={`flex flex-col items-center ${activeTab === 'scenes' ? 'text-cyan-400' : 'text-slate-500 hover:text-slate-300 transition'}`}>
-          <Film className="w-4 h-4 mb-0.5" /><span className="text-[10px]">Scenes</span>
-        </button>
-        <button onClick={() => setActiveTab('assets')} className={`flex flex-col items-center ${activeTab === 'assets' ? 'text-cyan-400' : 'text-slate-500 hover:text-slate-300 transition'}`}>
-          <Sparkles className="w-4 h-4 mb-0.5" /><span className="text-[10px]">Assets</span>
-        </button>
+      {/* MOBILE BOTTOM NAVIGATION — 8 tabs, scrollable on phones */}
+      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-[#0a0d14]/95 backdrop-blur-lg border-t border-slate-800 px-2 py-2 flex items-center gap-0.5 overflow-x-auto">
+        {[
+          { key: 'director', label: 'Director', Icon: Wand2 },
+          { key: 'projects', label: 'Projects', Icon: Layers },
+          { key: 'timeline', label: 'Timeline', Icon: Sliders },
+          { key: 'scenes', label: 'Scenes', Icon: Film },
+          { key: 'characters', label: 'Characters', Icon: Users },
+          { key: 'audio', label: 'Audio', Icon: AudioLines },
+          { key: 'looks', label: 'Looks', Icon: Palette },
+          { key: 'assets', label: 'Assets', Icon: Sparkles },
+        ].map(({ key, label, Icon }) => (
+          <button
+            key={key}
+            onClick={() => setActiveTab(key)}
+            className={`flex flex-col items-center flex-shrink-0 px-2.5 min-w-[58px] ${activeTab === key ? 'text-cyan-400' : 'text-slate-500 hover:text-slate-300 transition'}`}
+          >
+            <Icon className="w-4 h-4 mb-0.5" /><span className="text-[9px] font-bold">{label}</span>
+          </button>
+        ))}
       </nav>
+
+      {/* EXPORT OVERLAY — standalone so the Finished step can trigger it too */}
+      {isExporting && (
+        <div className="fixed inset-0 z-[70] bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center animate-fadeIn">
+          {exportStatus.startsWith('Export failed') ? (
+            <AlertTriangle className="w-12 h-12 text-red-400 mb-4" />
+          ) : exportProgress < 100 ? (
+            <Cpu className="w-12 h-12 text-cyan-400 animate-pulse mb-4" />
+          ) : (
+            <CheckCircle className="w-12 h-12 text-emerald-400 mb-4" />
+          )}
+          <h2 className="text-lg font-bold text-white mb-2">
+            {exportStatus.startsWith('Export failed') ? 'Export hit a snag' : 'Rendering Assembly...'}
+          </h2>
+          <p className="text-xs text-cyan-400 font-mono mb-6 break-words max-w-full">{exportStatus}</p>
+          {!exportStatus.startsWith('Export failed') && (
+            <>
+              <div className="w-full max-w-sm h-2 bg-slate-800 rounded-full overflow-hidden mb-2">
+                <div className="h-full bg-gradient-to-r from-cyan-500 to-indigo-500 transition-all duration-300 ease-out" style={{ width: `${exportProgress}%` }} />
+              </div>
+              <div className="text-xs text-slate-400 font-bold">{exportProgress}% Complete</div>
+            </>
+          )}
+          {exportStatus.startsWith('Export failed') && (
+            <button onClick={() => setIsExporting(false)} className="mt-2 text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded-lg transition">
+              Dismiss
+            </button>
+          )}
+        </div>
+      )}
 
       {/* MASTER ASSEMBLY PREVIEW MODAL */}
       {showAssemblyModal && (
         <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-4 sm:p-6">
           <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-full relative">
-
-            {/* Export Render Overlay — REAL */}
-            {isExporting && (
-              <div className="absolute inset-0 z-20 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center animate-fadeIn">
-                {exportStatus.startsWith('Export failed') ? (
-                  <AlertTriangle className="w-12 h-12 text-red-400 mb-4" />
-                ) : exportProgress < 100 ? (
-                  <Cpu className="w-12 h-12 text-cyan-400 animate-pulse mb-4" />
-                ) : (
-                  <CheckCircle className="w-12 h-12 text-emerald-400 mb-4" />
-                )}
-                <h2 className="text-lg font-bold text-white mb-2">
-                  {exportStatus.startsWith('Export failed') ? 'Export hit a snag' : 'Rendering Assembly...'}
-                </h2>
-                <p className="text-xs text-cyan-400 font-mono mb-6 break-words max-w-full">{exportStatus}</p>
-                {!exportStatus.startsWith('Export failed') && (
-                  <>
-                    <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden mb-2">
-                      <div className="h-full bg-gradient-to-r from-cyan-500 to-indigo-500 transition-all duration-300 ease-out" style={{ width: `${exportProgress}%` }} />
-                    </div>
-                    <div className="text-xs text-slate-400 font-bold">{exportProgress}% Complete</div>
-                  </>
-                )}
-                {exportStatus.startsWith('Export failed') && (
-                  <button onClick={() => setIsExporting(false)} className="mt-2 text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded-lg transition">
-                    Dismiss
-                  </button>
-                )}
-              </div>
-            )}
 
             {/* Modal Header */}
             <div className="flex items-center justify-between p-4 border-b border-slate-800 bg-slate-950/50">
