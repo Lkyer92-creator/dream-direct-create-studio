@@ -1165,6 +1165,7 @@ export default function DDCDirectorStudio() {
         imageName: s.imageName || '', reviewStatus: s.reviewStatus || 'pending',
         brollPrompt: s.brollPrompt, lipsyncPrompt: s.lipsyncPrompt, videoPrompt: s.videoPrompt,
         biblePrompt: s.biblePrompt,
+        castIds: Array.isArray(s.castIds) ? s.castIds : null,
         videoGen: s.videoGen && s.videoGen.status === 'done' ? { status: 'done', url: s.videoGen.url } : { status: 'idle' },
         trimStart: s.trimStart, trimEnd: s.trimEnd,
       }));
@@ -1459,7 +1460,11 @@ export default function DDCDirectorStudio() {
   const addPresetToCast = async (preset) => {
     if (cast.some(c => c.presetId === preset.id)) return;
     const copy = await clonePresetForCast(preset);
-    writeCast([...cast, copy]);
+    const nextCast = [...cast, copy];
+    const nextSegs = segsWithNewCastMember(segments, cast.map(c => c.id), copy.id);
+    setCast(nextCast);
+    setSegments(nextSegs);
+    writeActiveProject(project, lyricsText, nextSegs, nextCast, null, null);
   };
   const setVariantCastPortraits = (charId, vid, slots) => {
     const next = cast.map(c => c.id === charId
@@ -1467,6 +1472,14 @@ export default function DDCDirectorStudio() {
       : c);
     writeCast(next);
   };
+  // New cast member: scenes that were on "all" (castIds exactly the old full cast,
+  // or missing) gain the newcomer; scenes with a custom subset stay untouched.
+  const segsWithNewCastMember = (segs, oldIds, newId) =>
+    segs.map(s => {
+      const cur = Array.isArray(s.castIds) ? s.castIds : oldIds;
+      const isAll = cur.length === oldIds.length && oldIds.every(id => cur.includes(id));
+      return isAll ? { ...s, castIds: [...cur, newId] } : s;
+    });
   const removeFromCast = (charId) => {
     if (cast.length <= 1) return;
     if (!window.confirm('Remove this character from this project?')) return;
@@ -1474,10 +1487,15 @@ export default function DDCDirectorStudio() {
     if (doomed) deleteCharBlobs(doomed, `cast:${charId}`);
     else for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) deletePortraitBlob(castPortraitKey(charId, i));
     const next = cast.filter(c => c.id !== charId);
+    // Drop the removed character from every scene's assignment.
+    const nextSegs = segments.map(s => Array.isArray(s.castIds)
+      ? { ...s, castIds: s.castIds.filter(id => id !== charId) }
+      : s);
     const l = look.characterId === charId ? { ...look, characterId: next[0].id } : look;
     setCast(next);
+    setSegments(nextSegs);
     setLook(l);
-    writeActiveProject(project, lyricsText, segments, next, l, null);
+    writeActiveProject(project, lyricsText, nextSegs, next, l, null);
   };
   const saveCastToLibrary = async (char) => {
     if (characterPresets.some(p => p.name === char.name && (p.notes || '') === (char.notes || ''))) return;
@@ -1634,13 +1652,43 @@ export default function DDCDirectorStudio() {
     showToggle: true,
     onToggleShowAll: () => setMentionShowAll(v => !v),
   };
+  // Per-scene cast assignment ("who appears in this scene"). castIds is an array
+  // of character ids; a missing/non-array field means "all cast" (older saves).
+  // Always filtered to ids still in the project cast, so removals resolve safely.
+  const sceneCastIds = (scene) => {
+    const all = cast.map(c => c.id);
+    if (Array.isArray(scene.castIds)) return scene.castIds.filter(id => all.includes(id));
+    return all;
+  };
+  // The scene's assigned characters, in cast order.
+  const sceneCastChars = (scene) => {
+    const ids = new Set(sceneCastIds(scene));
+    return cast.filter(c => ids.has(c.id));
+  };
+  // "Character 1 (@odette) 🌟 Lead" — her labeling: cast order numbers characters.
+  const castCharLabel = (c) => {
+    const n = cast.findIndex(x => x.id === c.id) + 1;
+    const h = c.handle || deriveHandle(c.name);
+    if (n < 1) return `@${h}`;
+    const rd = c.role ? roleDef(c.role) : null;
+    return `Character ${n} (@${h})${rd ? ` ${rd.emoji} ${rd.label}` : ''}`;
+  };
+  const joinCharLabels = (labels) => labels.length > 2
+    ? labels.slice(0, -1).join(', ') + ', and ' + labels[labels.length - 1]
+    : labels.join(' and ');
+  // Assigned characters for prompt compilation; a scene with nobody assigned
+  // falls back to the Star so prompts never ship character-less.
+  const scenePeople = (scene) => {
+    const chars = sceneCastChars(scene);
+    return chars.length ? chars : [lockedChar];
+  };
   // "Character 1 (@odette) [refs 1A, 1C]" — which cast members a scene's prompts
   // mention, with their filled reference-photo slot letters, for the Bible export.
   const sceneCharacterLine = (scene) => {
     const text = [scene.approvedPrompt, scene.biblePrompt, scene.brollPrompt, scene.lipsyncPrompt, scene.videoPrompt]
       .filter(Boolean).join(' ');
-    if (!text) return '';
     const seen = new Set();
+    const seenIds = new Set();
     const found = [];
     const esc = (h) => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     [...castForMentions, ...characterPresets].forEach((c) => {
@@ -1648,8 +1696,16 @@ export default function DDCDirectorStudio() {
         const h = a.handle || deriveHandle(a.name);
         if (!h || seen.has(h.toLowerCase())) return;
         const re = new RegExp('@' + esc(h) + '(?!\\w)');
-        if (re.test(text)) { seen.add(h.toLowerCase()); found.push(a); }
+        if (re.test(text)) { seen.add(h.toLowerCase()); found.push(a); if (a._charId) seenIds.add(a._charId); }
       });
+    });
+    // Union: assigned cast members show up even when she didn't hand-type a mention.
+    sceneCastIds(scene).forEach((id) => {
+      if (seenIds.has(id)) return;
+      const c = cast.find(x => x.id === id);
+      if (!c) return;
+      seenIds.add(id);
+      found.push(charActors(c)[0]);
     });
     found.sort((a, b) => {
       const ai = cast.findIndex(c => c.id === a._charId); const bi = cast.findIndex(c => c.id === b._charId);
@@ -1684,15 +1740,18 @@ export default function DDCDirectorStudio() {
   const usePreset = async (preset) => {
     let c = cast.find(x => x.presetId === preset.id);
     let nextCast = cast;
+    let nextSegs = segments;
     if (!c) {
       c = await clonePresetForCast(preset);
       nextCast = [...cast, c];
+      nextSegs = segsWithNewCastMember(segments, cast.map(x => x.id), c.id);
     }
     nextCast = nextCast.map(x => x.id === c.id ? { ...x, role: 'star' } : (x.role === 'star' ? { ...x, role: '' } : x));
     const l = { ...look, characterId: c.id };
     setCast(nextCast);
+    setSegments(nextSegs);
     setLook(l);
-    writeActiveProject(project, lyricsText, segments, nextCast, l, null);
+    writeActiveProject(project, lyricsText, nextSegs, nextCast, l, null);
   };
   /* ------------------------- saved looks (global style presets) ------------------------- */
   const saveCurrentLook = () => {
@@ -1728,10 +1787,19 @@ export default function DDCDirectorStudio() {
     return `B-roll cutaway, cinematic music video, ${lockedStyle.descriptor}. No lip sync — pure atmosphere and texture. Setting: ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}. Camera: ${scene.cameraAngle}, slow ${scene.cameraMovement.toLowerCase()}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, 9:16 vertical.`;
   };
   const compileLipSyncPrompt = (scene) => {
-    return `Extreme close-up lip sync shot, cinematic music video. The character from the reference image sings directly into the lens, emotive, mouth forming the lyric "{{LYRIC}}". Keep face, wardrobe, and identity exactly as the reference image. Camera: intimate close-up, subtle slow dolly in. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, shallow depth of field, 9:16 vertical.`;
+    const people = scenePeople(scene);
+    const singer = people.find(c => c.id === lockedChar.id) || people[0];
+    const perfLine = people.length === 1
+      ? `${castCharLabel(singer)} from the reference image sings directly into the lens, emotive, mouth forming the lyric "{{LYRIC}}". Keep face, wardrobe, and identity exactly as the reference image.`
+      : `Lip sync shot \u2014 the characters from the reference images: ${joinCharLabels(people.map(castCharLabel))}. ${castCharLabel(singer)} sings directly into the lens, emotive, mouth forming the lyric "{{LYRIC}}"; the others are present in frame, true to their roles. Keep every face, wardrobe, and identity exactly as the reference images.`;
+    return `Extreme close-up lip sync shot, cinematic music video. ${perfLine} Camera: intimate close-up, subtle slow dolly in. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, shallow depth of field, 9:16 vertical.`;
   };
   const compileVideoPrompt = (scene) => {
-    return `${scene.characterAction}, ${scene.cameraMovement.toLowerCase()} camera move, ${scene.cameraAngle.toLowerCase()}. Setting: ${scene.setting || lockedTheme.notes}. Lighting: ${scene.lightingMood}. The character from the reference image performs the action \u2014 keep face, wardrobe, and identity exactly as the reference image. Lyric for this shot: "{{LYRIC}}". Colors: [${lockedPalette.hexes.join(', ')}]. Cinematic photorealistic motion, smooth natural movement, 9:16 vertical video.`;
+    const people = scenePeople(scene);
+    const charLine = people.length === 1
+      ? `${castCharLabel(people[0])} from the reference image performs the action \u2014 keep face, wardrobe, and identity exactly as the reference image.`
+      : `The characters from the reference images: ${joinCharLabels(people.map(castCharLabel))}. ${castCharLabel(people[0])} performs the action while the others appear in frame, true to their roles \u2014 keep every face, wardrobe, and identity exactly as the reference images.`;
+    return `${scene.characterAction}, ${scene.cameraMovement.toLowerCase()} camera move, ${scene.cameraAngle.toLowerCase()}. Setting: ${scene.setting || lockedTheme.notes}. Lighting: ${scene.lightingMood}. ${charLine} Lyric for this shot: "{{LYRIC}}". Colors: [${lockedPalette.hexes.join(', ')}]. Cinematic photorealistic motion, smooth natural movement, 9:16 vertical video.`;
   };
   // Full DIY production prompt for the Bible: paste into Runway / Kling yourself.
   const compileBiblePrompt = (scene) => {
@@ -1928,6 +1996,11 @@ export default function DDCDirectorStudio() {
         lipsyncPrompt: (p && p.lipsyncPrompt) || '',
         videoPrompt: (p && p.videoPrompt) || '',
         biblePrompt: (p && p.biblePrompt) || '',
+        // Per-scene cast assignment. Missing field (older saves) = all cast;
+        // stale ids (removed characters) are dropped.
+        castIds: (p && Array.isArray(p.castIds))
+          ? p.castIds.filter(id => cast.some(c => c.id === id))
+          : cast.map(c => c.id),
         videoGen: (p && p.videoGen) || { status: 'idle' },
         clipUrl: (p && p.clipUrl) || null,
         clipName: (p && p.clipName) || '',
@@ -2099,6 +2172,18 @@ export default function DDCDirectorStudio() {
       return next;
     });
   };
+  // Per-scene cast assignment. Stored direction prompts that were auto-compiled
+  // (exact match to the old compile) are cleared so the fresh compile — with the
+  // new cast — shows; hand-edited prompt text is never touched.
+  const setSceneCast = (index, ids) => {
+    const s = segments[index];
+    if (!s) return;
+    const ordered = cast.map(c => c.id).filter(id => ids.includes(id));
+    const patch = { castIds: ordered };
+    if (typeof s.videoPrompt === 'string' && s.videoPrompt && s.videoPrompt === compileVideoPrompt(s)) patch.videoPrompt = '';
+    if (typeof s.lipsyncPrompt === 'string' && s.lipsyncPrompt && s.lipsyncPrompt === compileLipSyncPrompt(s)) patch.lipsyncPrompt = '';
+    updateScene(index, patch);
+  };
 
   /* ------------------------- insert / delete scenes ------------------------- */
   // A blank scene shell with the same shape buildSegments produces.
@@ -2131,6 +2216,8 @@ export default function DDCDirectorStudio() {
       lipsyncPrompt: '',
       videoPrompt: '',
       biblePrompt: '',
+      // New scenes start with the whole cast assigned.
+      castIds: cast.map(c => c.id),
       videoGen: { status: 'idle' },
       clipUrl: null,
       clipName: '',
@@ -2508,6 +2595,48 @@ export default function DDCDirectorStudio() {
       )}
     </div>
   );
+
+  // Compact per-scene cast assignment: which cast members appear in this scene.
+  // Tap a chip to toggle; All/None shortcuts. Phone-friendly wrapping row.
+  const renderSceneCastChips = (index, s) => {
+    if (!cast.length) return null;
+    const onIds = new Set(sceneCastIds(s));
+    const allOn = cast.every(c => onIds.has(c.id));
+    const applyIds = (ids) => setSceneCast(index, ids);
+    return (
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] uppercase font-bold text-slate-500">Cast in scene</span>
+          <div className="flex items-center gap-1">
+            <button onClick={() => applyIds(cast.map(c => c.id))} className="text-[10px] font-bold text-cyan-400 hover:text-cyan-300 px-1.5 py-0.5">All</button>
+            <span className="text-slate-700 text-[10px]">|</span>
+            <button onClick={() => applyIds([])} className="text-[10px] font-bold text-slate-400 hover:text-slate-300 px-1.5 py-0.5">None</button>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {cast.map((c, ci) => {
+            const on = onIds.has(c.id);
+            const rd = c.role ? roleDef(c.role) : null;
+            return (
+              <button
+                key={c.id}
+                onClick={() => { const n = new Set(onIds); if (on) n.delete(c.id); else n.add(c.id); applyIds([...n]); }}
+                title={(on ? 'Remove from this scene: ' : 'Add to this scene: ') + c.name}
+                className={`flex items-center gap-1 px-2 py-1 rounded-full border text-[10px] font-bold transition active:scale-95 ${on ? 'border-cyan-500 bg-cyan-950/50 text-cyan-200' : 'border-slate-700 bg-slate-900 text-slate-500 opacity-50'}`}
+              >
+                <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-black ${on ? 'bg-cyan-500 text-slate-950' : 'bg-slate-700 text-slate-300'}`}>{ci + 1}</span>
+                <span className="max-w-[90px] truncate">{c.name}</span>
+                {rd && <span>{rd.emoji}</span>}
+              </button>
+            );
+          })}
+        </div>
+        {!allOn && onIds.size === 0 && (
+          <p className="text-[10px] text-slate-600">No cast assigned — prompts fall back to your Star.</p>
+        )}
+      </div>
+    );
+  };
 
   /* ------------------------- Director: Bible copy-all ------------------------- */
   const copyAllBible = () => {
@@ -3107,6 +3236,7 @@ export default function DDCDirectorStudio() {
                   {renderTimeEditor(idx, seg)}
                   {renderSectionLabelEditor(idx, seg)}
                   {renderLyricsEditor(idx, seg)}
+                  {renderSceneCastChips(idx, seg)}
                 </div>
               ))}
               {renderAddSceneButton()}
@@ -3184,6 +3314,7 @@ export default function DDCDirectorStudio() {
                     </div>
                     <h2 className="text-base font-bold text-white mt-1">{sceneTag(scene)}</h2>
                     {renderLyricsEditor(selectedSceneIndex, scene)}
+                    {renderSceneCastChips(selectedSceneIndex, scene)}
                     <div className="mt-2">{renderTimeEditor(selectedSceneIndex, scene)}</div>
                   </div>
 
@@ -3539,6 +3670,7 @@ export default function DDCDirectorStudio() {
                       {renderTimeEditor(i, s)}
                       {renderSectionLabelEditor(i, s)}
                       {renderLyricsEditor(i, s)}
+                      {renderSceneCastChips(i, s)}
                     </div>
                   ))}
                 </div>
@@ -3568,6 +3700,7 @@ export default function DDCDirectorStudio() {
                       {renderTimeEditor(i, s)}
                       {renderSectionLabelEditor(i, s)}
                       {renderLyricsEditor(i, s)}
+                      {renderSceneCastChips(i, s)}
                     </div>
                   ))}
                 </div>
@@ -3666,6 +3799,7 @@ export default function DDCDirectorStudio() {
                       )}
                     </div>
                     <p className="text-[11px] text-slate-400 italic">"{s.lyrics}"</p>
+                    {renderSceneCastChips(i, s)}
                     <div className="flex justify-between items-center">
                       <label className="text-[10px] uppercase font-bold text-slate-400">Text-to-image prompt <span className="text-slate-600 normal-case">(Fooocus)</span></label>
                       <button
@@ -3739,6 +3873,7 @@ export default function DDCDirectorStudio() {
                           </button>
                         )}
                       </div>
+                      {renderSceneCastChips(i, s)}
                     </div>
                   </div>
                 ))}
@@ -3779,6 +3914,7 @@ export default function DDCDirectorStudio() {
                         )}
                       </div>
                       <p className="text-[11px] text-slate-400 italic">"{s.lyrics}"</p>
+                      {renderSceneCastChips(i, s)}
                       <div className="flex gap-3">
                         <div className="w-28 flex-shrink-0">
                           {s.keyframeImageUrl ? (
