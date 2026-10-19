@@ -103,18 +103,25 @@ async function pollinationsChat(messages) {
   return content;
 }
 
-// Pull {"theme","storyline"} JSON out of the model reply; fall back to raw text.
-function parseThemeStoryline(content) {
-  const m = String(content).match(/\{[\s\S]*\}/);
+// Lenient single-field extraction from a model reply: strips markdown fences,
+// tries JSON {"field"}, falls back to a regex that tolerates escaped quotes and
+// newlines inside the value, and finally to the raw trimmed text.
+function parseSingleField(content, field) {
+  const t = String(content || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  const m = t.match(/\{[\s\S]*\}/);
   if (m) {
     try {
       const j = JSON.parse(m[0]);
-      if (j && (j.theme || j.storyline)) {
-        return { theme: String(j.theme || ''), storyline: String(j.storyline || '') };
-      }
-    } catch (e) { /* fall through */ }
+      if (j && j[field]) return String(j[field]).trim();
+    } catch (e) { /* fall through to regex */ }
+    const re = new RegExp('"' + field + '"\\s*:\\s*"([\\s\\S]*?)"(?=\\s*(,\\s*"|\\}))', 's');
+    const rm = m[0].match(re);
+    if (rm) {
+      try { return JSON.parse('"' + rm[1] + '"').trim(); }
+      catch (e) { return rm[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').trim(); }
+    }
   }
-  return { theme: '', storyline: String(content).trim() };
+  return t;
 }
 
 /* ============================== INDEXEDDB AUDIO LIBRARY ============================== */
@@ -491,6 +498,21 @@ const CHAR_DETAIL_FIELDS = [
   ['accessories', 'Accessories'],
 ];
 const CHAR_ALL_FIELDS = ['skinTone', 'build', 'faceShape', 'marks', 'hair', 'headwear', 'mood', 'artStyle', 'wardrobe', 'accessories', 'notes'];
+/* Story roles — Lindsey's key: 🌟 Lead, ❤️ Co-lead, 💜 Confidant, 💙 Mentor,
+   💛 Light, 🩷 Muse, 💔 Tragic figure, 💀 Antagonist.
+   `role` lives on the character (library + cast so it carries into future
+   projects); '' = None. Built-in presets ship with no role. */
+const CHARACTER_ROLES = [
+  { id: 'star', emoji: '\u{1F31F}', label: 'Lead', desc: 'The protagonist — the video\u2019s main character.' },
+  { id: 'colead', emoji: '\u2764\uFE0F', label: 'Co-lead', desc: 'Second lead / love interest — equal partner in the story.' },
+  { id: 'confidant', emoji: '\u{1F49C}', label: 'Confidant', desc: 'Loyal best friend, emotional anchor.' },
+  { id: 'mentor', emoji: '\u{1F499}', label: 'Mentor', desc: 'Guide / teacher figure.' },
+  { id: 'light', emoji: '\u{1F49B}', label: 'Light', desc: 'Warmth, humor, comic relief.' },
+  { id: 'muse', emoji: '\u{1FA77}', label: 'Muse', desc: 'Innocence, inspiration, sweetness.' },
+  { id: 'tragic', emoji: '\u{1F494}', label: 'Tragic figure', desc: 'Heartbreak, loss, betrayal.' },
+  { id: 'antagonist', emoji: '\u{1F480}', label: 'Antagonist', desc: 'The villain / opposition.' },
+];
+function roleDef(id) { return CHARACTER_ROLES.find(r => r.id === id) || null; }
 /* Fields that exist ONLY in the new shape ('hair' is shared with the legacy blob). */
 const MODERN_KEYS = ['skinTone', 'build', 'faceShape', 'marks', 'headwear', 'mood', 'artStyle', 'wardrobe', 'accessories', 'notes'];
 function pickCharFields(src) {
@@ -691,6 +713,39 @@ const SectionBadge = ({ title }) => {
 
 /* One-tap @mention insert bar — sits above every prompt textarea.
    Shows the open project's cast first; the "All" toggle swaps in the full library. */
+/* Tappable emoji role row. onPick(roleId) — '' clears to None. */
+function RolePicker({ value, onPick }) {
+  return (
+    <div className="flex flex-wrap gap-1 items-center">
+      {CHARACTER_ROLES.map(r => (
+        <button
+          key={r.id}
+          onClick={() => onPick(r.id)}
+          title={`${r.emoji} ${r.label} — ${r.desc}`}
+          className={`text-base leading-none px-1.5 py-1.5 rounded-lg border transition ${value === r.id ? 'bg-amber-600/30 border-amber-500/60' : 'bg-slate-800 border-slate-700 hover:border-slate-500'}`}
+        >
+          {r.emoji}
+        </button>
+      ))}
+      <button
+        onClick={() => onPick('')}
+        title="No role"
+        className={`text-[10px] font-bold px-2 py-1.5 rounded-lg border transition ${!value ? 'bg-slate-600 border-slate-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'}`}
+      >
+        None
+      </button>
+    </div>
+  );
+}
+function RoleBadge({ role }) {
+  const r = roleDef(role);
+  if (!r) return null;
+  return (
+    <span className="text-[9px] font-bold bg-slate-800 border border-slate-700 text-slate-200 px-1.5 py-0.5 rounded flex-shrink-0" title={r.desc}>
+      {r.emoji} {r.label}
+    </span>
+  );
+}
 function MentionBar({ presets, onPick, showAll, onToggleShowAll, showToggle }) {
   if (!presets || !presets.length) return null;
   return (
@@ -703,6 +758,7 @@ function MentionBar({ presets, onPick, showAll, onToggleShowAll, showToggle }) {
             className="text-[10px] font-bold bg-cyan-600/20 hover:bg-cyan-600/40 border border-cyan-500/40 text-cyan-300 px-2 py-1 rounded-lg transition flex items-center gap-1"
           >
             {p._castNum ? <span className="text-[9px] font-black bg-cyan-600 text-white px-1 rounded">{p._castNum}</span> : null}
+            {p.role && roleDef(p.role) ? <span title={roleDef(p.role).label}>{roleDef(p.role).emoji}</span> : null}
             <span>@{p.handle}</span>
           </button>
           {(p._variantBtns || []).map(v => (
@@ -1042,6 +1098,8 @@ export default function DDCDirectorStudio() {
   const [directorStep, setDirectorStep] = useState(1);
   const [isGeneratingTheme, setIsGeneratingTheme] = useState(false);
   const [themeError, setThemeError] = useState('');
+  const [isGeneratingStoryline, setIsGeneratingStoryline] = useState(false);
+  const [storylineError, setStorylineError] = useState('');
   const [loopEnabled, setLoopEnabled] = useState(true);
 
   // Playback state (driven by the real <audio> element)
@@ -1136,6 +1194,31 @@ export default function DDCDirectorStudio() {
   };
   const writeCast = (c) => { setCast(c); writeActiveProject(project, lyricsText, segments, c, null, null); };
   const writeLook = (l) => { setLook(l); writeActiveProject(project, lyricsText, segments, null, l, null); };
+  // Star/role sync: 🌟 is the single lead. Assigning 🌟 sets the Star picker;
+  // changing the Star picker moves 🌟 to that character. Other roles are badges only.
+  const setCastRole = (charId, role) => {
+    const next = cast.map(c => {
+      if (c.id === charId) return { ...c, role: role || '' };
+      if (role === 'star' && c.role === 'star') return { ...c, role: '' };
+      return c;
+    });
+    let l = look;
+    if (role === 'star') l = { ...look, characterId: charId };
+    setCast(next);
+    setLook(l);
+    writeActiveProject(project, lyricsText, segments, next, l, null);
+  };
+  const setStarCharacter = (charId) => {
+    const next = cast.map(c => {
+      if (c.id === charId) return { ...c, role: 'star' };
+      if (c.role === 'star') return { ...c, role: '' };
+      return c;
+    });
+    const l = { ...look, characterId: charId };
+    setCast(next);
+    setLook(l);
+    writeActiveProject(project, lyricsText, segments, next, l, null);
+  };
 
   /* ------------------------- projects: open / new / rename / duplicate / delete ------------------------- */
   const openProject = async (id, saveFirst = true) => {
@@ -1456,7 +1539,7 @@ export default function DDCDirectorStudio() {
       });
     } else {
       next = [{
-        id: charForm.id || 'ch' + Date.now().toString(36), name: charForm.name.trim(), handle,
+        id: charForm.id || 'ch' + Date.now().toString(36), name: charForm.name.trim(), handle, role: charForm.role || '',
         ...pickCharFields(charForm), portraits: charForm.portraits, variants,
       }, ...characterPresets];
     }
@@ -1580,9 +1663,11 @@ export default function DDCDirectorStudio() {
         .filter(Boolean);
       const refStr = refs.length ? ` [refs ${refs.join(', ')}]` : '';
       if (n < 1) return `@${a.handle}${refStr}`;
-      // "Character 1, variant Young (@odetteYoung) [refs 1A, 1C]"
+      // "Character 1, variant Young (@odetteYoung) 🌟 Lead [refs 1A, 1C]"
       const vtag = a._variantNum > 1 ? `, variant ${a._variantLabel}` : '';
-      return `Character ${n}${vtag} (@${a.handle})${refStr}`;
+      const rd = a.role ? roleDef(a.role) : null;
+      const roleTag = rd ? ` ${rd.emoji} ${rd.label}` : '';
+      return `Character ${n}${vtag} (@${a.handle})${roleTag}${refStr}`;
     });
     return `Characters: ${parts.join(' · ')}`;
   };
@@ -1602,9 +1687,10 @@ export default function DDCDirectorStudio() {
     if (!c) {
       c = await clonePresetForCast(preset);
       nextCast = [...cast, c];
-      setCast(nextCast);
     }
+    nextCast = nextCast.map(x => x.id === c.id ? { ...x, role: 'star' } : (x.role === 'star' ? { ...x, role: '' } : x));
     const l = { ...look, characterId: c.id };
+    setCast(nextCast);
     setLook(l);
     writeActiveProject(project, lyricsText, segments, nextCast, l, null);
   };
@@ -2130,33 +2216,56 @@ export default function DDCDirectorStudio() {
     </button>
   );
 
-  /* ------------------------- Director: theme + storyline (Pollinations text) ------------------------- */
-  const handleGenerateTheme = async () => {
+  /* ------------------------- Director: theme + storyline, generated separately ------------------------- */
+  const themeStoryContext = () => {
+    const sceneList = segments
+      .map(s => `${fmtClock(s.startTime)}–${fmtClock(s.endTime)} [${s.title}]: ${s.lyrics}`)
+      .join('\n');
+    return `Song: "${project.title}"${project.artist ? ` by ${project.artist}` : ''}. Duration: ${audio ? fmtClock(audio.duration) : 'unknown'}. ${segments.length} scenes.\n\nTimestamped lyrics:\n${sceneList}\n\nLocked look for reference — style: ${lockedStyle.name} (${lockedStyle.descriptor}); palette: ${lockedPalette.name} (${lockedPalette.mood}); character: ${describeChar(lockedChar)}; world: ${lockedTheme.name} (${lockedTheme.notes}).`;
+  };
+  const handleGenerateThemeOnly = async () => {
     if (!segments.length) { setThemeError('Slice your song into intervals first (Step 2).'); return; }
     setIsGeneratingTheme(true);
     setThemeError('');
     try {
-      const sceneList = segments
-        .map(s => `${fmtClock(s.startTime)}–${fmtClock(s.endTime)} [${s.title}]: ${s.lyrics}`)
-        .join('\n');
       const content = await pollinationsChat([
         {
           role: 'system',
-          content: 'You are a music video director. Given a song\'s timestamped lyrics, invent one cohesive visual world for its music video. Reply with ONLY valid JSON: {"theme": "...", "storyline": "..."}. "theme": 3-5 sentences — visual style, color palette, mood, cinematography, wardrobe. Vivid and specific. "storyline": 4-6 sentences — the narrative arc of the video across the song, referencing the sections by name.',
+          content: 'You are a music video director. Given a song\'s timestamped lyrics, invent ONLY the visual world for its music video — visual style, color palette, mood, cinematography, wardrobe. 3-5 vivid, specific sentences. Reply with ONLY valid JSON: {"theme": "..."}.',
         },
-        {
-          role: 'user',
-          content: `Song: "${project.title}"${project.artist ? ` by ${project.artist}` : ''}. Duration: ${audio ? fmtClock(audio.duration) : 'unknown'}. ${segments.length} scenes.\n\nTimestamped lyrics:\n${sceneList}\n\nLocked look for reference — style: ${lockedStyle.name} (${lockedStyle.descriptor}); palette: ${lockedPalette.name} (${lockedPalette.mood}); character: ${describeChar(lockedChar)}; world: ${lockedTheme.name} (${lockedTheme.notes}).`,
-        },
+        { role: 'user', content: themeStoryContext() },
       ]);
-      const { theme, storyline } = parseThemeStoryline(content);
-      const p = { ...project, themeText: theme, storylineText: storyline };
+      const theme = parseSingleField(content, 'theme');
+      const p = { ...project, themeText: theme };
       setProject(p);
       persist(p, lyricsText, segments);
     } catch (e) {
       setThemeError(e.message || 'Theme generation failed.');
     } finally {
       setIsGeneratingTheme(false);
+    }
+  };
+  const handleGenerateStoryline = async () => {
+    if (!segments.length) { setStorylineError('Slice your song into intervals first (Step 2).'); return; }
+    setIsGeneratingStoryline(true);
+    setStorylineError('');
+    try {
+      const themeCtx = (project.themeText || '').trim();
+      const content = await pollinationsChat([
+        {
+          role: 'system',
+          content: 'You are a music video director. Given a song\'s timestamped lyrics and the video\'s visual theme, write the narrative arc of the music video across the song, referencing the sections by name. 4-6 sentences. Reply with ONLY valid JSON: {"storyline": "..."}.',
+        },
+        { role: 'user', content: themeStoryContext() + (themeCtx ? `\n\nCurrent visual theme (stay consistent with it):\n${themeCtx}` : '') },
+      ]);
+      const storyline = parseSingleField(content, 'storyline');
+      const p = { ...project, storylineText: storyline };
+      setProject(p);
+      persist(p, lyricsText, segments);
+    } catch (e) {
+      setStorylineError(e.message || 'Storyline generation failed.');
+    } finally {
+      setIsGeneratingStoryline(false);
     }
   };
 
@@ -3013,7 +3122,7 @@ export default function DDCDirectorStudio() {
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">Shot Deck</h3>
                 <label className="flex items-center space-x-2 text-[11px] text-slate-400">
                   <span className="font-bold uppercase tracking-wider">Star</span>
-                  <select value={look.characterId} onChange={(e) => writeLook({ ...look, characterId: e.target.value })} className="bg-slate-950 border border-slate-700 rounded-lg p-1.5 text-xs text-white focus:border-cyan-500 focus:outline-none max-w-[160px]">
+                  <select value={look.characterId} onChange={(e) => setStarCharacter(e.target.value)} className="bg-slate-950 border border-slate-700 rounded-lg p-1.5 text-xs text-white focus:border-cyan-500 focus:outline-none max-w-[160px]">
                     {cast.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
                 </label>
@@ -3471,16 +3580,29 @@ export default function DDCDirectorStudio() {
                 <h2 className="text-sm font-bold text-white flex items-center space-x-2">
                   <Sparkles className="w-4 h-4 text-amber-400" /><span>Step 4 — Theme + storyline</span>
                 </h2>
+                <div className="grid grid-cols-2 gap-2">
                 <button
-                  onClick={handleGenerateTheme}
+                  onClick={handleGenerateThemeOnly}
                   disabled={isGeneratingTheme || !segments.length}
-                  className="w-full text-sm font-bold bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-xl transition flex items-center justify-center space-x-2"
+                  className="text-sm font-bold bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-xl transition flex items-center justify-center space-x-2"
                 >
                   {isGeneratingTheme ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-                  <span>{isGeneratingTheme ? 'Dreaming up your world…' : 'Generate theme + storyline (free)'}</span>
+                  <span>{isGeneratingTheme ? 'Dreaming\u2026' : 'Generate theme'}</span>
                 </button>
+                <button
+                  onClick={handleGenerateStoryline}
+                  disabled={isGeneratingStoryline || !segments.length}
+                  className="text-sm font-bold bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-2.5 rounded-xl transition flex items-center justify-center space-x-2"
+                >
+                  {isGeneratingStoryline ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+                  <span>{isGeneratingStoryline ? 'Writing\u2026' : 'Generate storyline'}</span>
+                </button>
+                </div>
                 {themeError && (
                   <p className="text-xs text-red-400 flex items-center space-x-1.5"><AlertTriangle className="w-3.5 h-3.5" /><span>{themeError}</span></p>
+                )}
+                {storylineError && (
+                  <p className="text-xs text-red-400 flex items-center space-x-1.5"><AlertTriangle className="w-3.5 h-3.5" /><span>{storylineError}</span></p>
                 )}
                 <div className="space-y-2">
                   <label className="text-[10px] uppercase font-bold text-slate-400">Visual theme <span className="text-slate-600 normal-case">(style · palette · mood — editable)</span></label>
@@ -3911,7 +4033,7 @@ export default function DDCDirectorStudio() {
           <div className="space-y-4 animate-fadeIn">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-bold text-white">Character library</h2>
-              <button onClick={() => { const nid = 'ch' + Date.now().toString(36); openCharForm({ id: nid, name: '', handle: '', skinTone: '', build: '', faceShape: '', marks: '', hair: '', headwear: '', mood: '', artStyle: '', wardrobe: '', accessories: '', notes: '', variants: [], portraits: DEFAULT_SLOT_LABELS.map((label, i) => ({ label, key: charPortraitKey(nid, i), url: null })) }); }} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded-xl flex items-center space-x-1.5 transition">
+              <button onClick={() => { const nid = 'ch' + Date.now().toString(36); openCharForm({ id: nid, name: '', handle: '', role: '', skinTone: '', build: '', faceShape: '', marks: '', hair: '', headwear: '', mood: '', artStyle: '', wardrobe: '', accessories: '', notes: '', variants: [], portraits: DEFAULT_SLOT_LABELS.map((label, i) => ({ label, key: charPortraitKey(nid, i), url: null })) }); }} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded-xl flex items-center space-x-1.5 transition">
                 <Plus className="w-3.5 h-3.5" /><span>New</span>
               </button>
             </div>
@@ -3933,6 +4055,10 @@ export default function DDCDirectorStudio() {
                     />
                   </div>
                 ))}
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Story role <span className="text-slate-600 normal-case">(carries into every project)</span></label>
+                  <RolePicker value={charForm.role} onPick={(r) => setCharForm({ ...charForm, role: r })} />
+                </div>
                 <div>
                   <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Versions <span className="text-slate-600 normal-case">(young / old / alternate looks — each gets its own 4 angles)</span></label>
                   <div className="flex flex-wrap gap-1.5">
@@ -4099,6 +4225,7 @@ export default function DDCDirectorStudio() {
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <h4 className="text-xs font-bold text-white truncate">{p.name}</h4>
                         <span className="text-[9px] font-mono font-bold bg-cyan-950 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-800">@{p.handle}</span>
+                        <RoleBadge role={p.role} />
                       </div>
                       <p className="text-[11px] text-slate-400 line-clamp-2 mt-1">{charBlurb(p)}</p>
                       <p className="text-[10px] text-slate-500 truncate mt-0.5">{p.wardrobe || p.mood}</p>
@@ -4374,11 +4501,16 @@ export default function DDCDirectorStudio() {
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="text-[9px] font-black bg-cyan-600 text-white px-1.5 py-0.5 rounded">Character {ci + 1}</span>
                           <h4 className="text-xs font-bold text-white truncate">{char.name}</h4>
+                          <RoleBadge role={char.role} />
                           {look.characterId === char.id && (
                             <span className="text-[9px] font-bold bg-cyan-950 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-800 flex-shrink-0">ACTIVE</span>
                           )}
                         </div>
                         <p className="text-[11px] text-slate-300 line-clamp-2 mt-1">{charBlurb(char)}</p>
+                        <div className="mt-2">
+                          <p className="text-[9px] uppercase font-bold text-slate-500 mb-1">Story role <span className="text-slate-600 normal-case">(🌟 syncs with Star)</span></p>
+                          <RolePicker value={char.role} onPick={(r) => setCastRole(char.id, r)} />
+                        </div>
                         <div className="mt-2 flex flex-wrap gap-1.5">
                           <button onClick={() => saveCastToLibrary(char)} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded flex items-center space-x-1 transition">
                             <Download className="w-3 h-3" /><span>Save to library</span>
@@ -4430,7 +4562,7 @@ export default function DDCDirectorStudio() {
               <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 space-y-3">
                 <div>
                   <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Star character</label>
-                  <select value={look.characterId} onChange={(e) => writeLook({ ...look, characterId: e.target.value })} className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-cyan-500 focus:outline-none">
+                  <select value={look.characterId} onChange={(e) => setStarCharacter(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-cyan-500 focus:outline-none">
                     {cast.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
                 </div>
