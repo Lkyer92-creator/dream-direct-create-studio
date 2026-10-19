@@ -1156,7 +1156,7 @@ export default function DDCDirectorStudio() {
     const h = p.handle || deriveHandle(p.name);
     const desc = charSummary(p) || [p.face, p.hair ? `Hair: ${p.hair}` : '', p.outfit ? `Wearing ${p.outfit}` : '', p.styleNotes || ''].filter(Boolean).join(' ');
     const notesLine = p.notes ? `\n\nNotes: ${p.notes}` : '';
-    return `Character portrait reference for ${p.name} (@${h}) — generate in Fooocus, then upload it as this character's portrait.\n\n${desc}${notesLine}\n\nArt style: ${lockedStyle.descriptor}. Palette mood: ${lockedPalette.mood} [${lockedPalette.hexes.join(', ')}]. World: ${lockedTheme.name} — ${lockedTheme.notes}.\n\nFraming: clean character reference, neutral mid-gray background, upper body, facing the camera, neutral expression, consistent facial features, even studio lighting, photorealistic, high detail, 9:16 vertical.`;
+    return `Character portrait reference for ${p.name} (@${h}).\n\n${desc}${notesLine}\n\nArt style: ${lockedStyle.descriptor}. Palette mood: ${lockedPalette.mood} [${lockedPalette.hexes.join(', ')}]. World: ${lockedTheme.name} — ${lockedTheme.notes}.\n\nFraming: clean character reference, neutral mid-gray background, upper body, facing the camera, neutral expression, consistent facial features, even studio lighting, photorealistic, high detail, 9:16 vertical.`;
   };
   // Inserts "@handle " into a prompt textarea at the cursor (or appends).
   const insertMention = (sceneIndex, field, textareaId, baseText, handle) => {
