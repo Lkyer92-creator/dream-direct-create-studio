@@ -250,6 +250,17 @@ async function hydrateCharsPortraits(chars, prefixFn) {
     if (!Array.isArray(c.portraits)) dirty = true;
     const nc = { ...c, portraits: slots };
     delete nc.imageUrl;
+    // hydrate each variant's own 4 slots under its own blob namespace
+    const shaped = ensureVariants(nc, prefix);
+    let vd = false;
+    for (const v of shaped.variants) {
+      const vp = variantBlobPrefix(prefix, v.id);
+      const { slots: vs, dirty: d2 } = await hydratePortraitSlots(v.portraits, vp);
+      if (d2) vd = true;
+      v.portraits = vs;
+    }
+    if (vd || !Array.isArray(c.variants)) dirty = true;
+    nc.variants = shaped.variants;
     out.push(nc);
   }
   return { chars: out, dirty };
@@ -550,7 +561,74 @@ function saveableChar(c) {
   const o = { ...c };
   delete o.imageUrl;
   o.portraits = saveablePortraits(c.portraits);
+  o.variants = (Array.isArray(c.variants) ? c.variants : []).map(v => {
+    const vo = { ...v };
+    vo.portraits = saveablePortraits(v.portraits);
+    return vo;
+  });
   return o;
+}
+
+/* ================== CHARACTER VARIANTS (sub-characters: Young / Old / …) ==================
+   char.variants = [extra versions beyond the base]. The base character IS variant 1
+   (its fields/portraits/handle); extras are variants 2, 3, …
+   variant = { id, label ("Young"), handle (@odetteYoung), ...CHAR_ALL_FIELDS,
+               portraits:[4 slots] }.
+   Slot badges: {variantNum}{letter} — young Odette's views are 1A–1D, old Odette's
+   are 2A–2D. Variant 1 keeps the legacy portrait blob keys (no moves on migration). */
+function variantBlobPrefix(charPrefix, variantId) {
+  return `${charPrefix}:v${variantId}`;
+}
+// Ensure a character has a well-formed variants array (extras only; base is variant 1).
+function ensureVariants(char, prefix) {
+  const pfx = prefix || `char:${char && char.id ? char.id : 'tmp'}`;
+  const vars = (Array.isArray(char.variants) ? char.variants : []).filter(Boolean).map((v) => {
+    const o = { ...v };
+    if (!o.id) o.id = 'v' + Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36);
+    if (!o.label) o.label = 'Version';
+    o.portraits = normalizePortraits({ portraits: o.portraits }, variantBlobPrefix(pfx, o.id));
+    return o;
+  });
+  return { ...char, variants: vars };
+}
+// Auto-derive a sub-handle: base "odette" + label "Young" -> "odetteYoung".
+function deriveVariantHandle(baseHandle, label, num) {
+  const clean = String(label || '').replace(/[^a-zA-Z0-9]/g, '');
+  const cap = clean ? clean.charAt(0).toUpperCase() + clean.slice(1) : 'V' + (num || 2);
+  return ((baseHandle || 'actor') + cap).slice(0, 24);
+}
+// Merge a variant over its character into a flat "actor" the existing
+// description / portrait / mention code consumes unchanged.
+function actorView(char, variant, variantNum) {
+  const num = variantNum || 1;
+  if (!variant) {
+    return { ...char, _variantNum: 1, _variantLabel: 'Base', _charId: char.id };
+  }
+  const label = variant.label || `Version ${num}`;
+  return {
+    ...char,
+    ...pickCharFields(variant),
+    name: `${char.name || 'Character'} (${label})`,
+    handle: variant.handle || char.handle,
+    portraits: variant.portraits,
+    _variantNum: num,
+    _variantLabel: label,
+    _charId: char.id,
+  };
+}
+// All variants of a character as flat actors: [base, v2, v3, …].
+function charActors(char) {
+  const base = actorView(char, null, 1);
+  const rest = (Array.isArray(char.variants) ? char.variants : []).map((v, i) => actorView(char, v, i + 2));
+  return [base, ...rest];
+}
+// Delete every portrait blob for a character, including all variant slots.
+async function deleteCharBlobs(char, prefix) {
+  const pfx = prefix || `char:${char.id}`;
+  for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) deletePortraitBlob(`${pfx}:${i}`);
+  for (const v of (char.variants || [])) {
+    for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) deletePortraitBlob(`${pfx}:v${v.id}:${i}`);
+  }
 }
 
 const SECTION_ORDER = ['Intro', 'Verse 1', 'Pre-Chorus', 'Chorus', 'Verse 2', 'Chorus', 'Bridge', 'Final Chorus'];
@@ -619,14 +697,26 @@ function MentionBar({ presets, onPick, showAll, onToggleShowAll, showToggle }) {
     <div className="flex flex-wrap gap-1.5 items-center">
       <span className="text-[9px] uppercase font-bold text-slate-500 flex items-center gap-1"><AtSign className="w-3 h-3" />Character:</span>
       {presets.map(p => (
-        <button
-          key={p.id}
-          onClick={() => onPick(p.handle)}
-          className="text-[10px] font-bold bg-cyan-600/20 hover:bg-cyan-600/40 border border-cyan-500/40 text-cyan-300 px-2 py-1 rounded-lg transition flex items-center gap-1"
-        >
-          {p._castNum ? <span className="text-[9px] font-black bg-cyan-600 text-white px-1 rounded">{p._castNum}</span> : null}
-          <span>@{p.handle}</span>
-        </button>
+        <span key={p.id} className="inline-flex items-center gap-1">
+          <button
+            onClick={() => onPick(p.handle)}
+            className="text-[10px] font-bold bg-cyan-600/20 hover:bg-cyan-600/40 border border-cyan-500/40 text-cyan-300 px-2 py-1 rounded-lg transition flex items-center gap-1"
+          >
+            {p._castNum ? <span className="text-[9px] font-black bg-cyan-600 text-white px-1 rounded">{p._castNum}</span> : null}
+            <span>@{p.handle}</span>
+          </button>
+          {(p._variantBtns || []).map(v => (
+            <button
+              key={v.handle}
+              onClick={() => onPick(v.handle)}
+              title={`${p.name} — ${v.label}`}
+              className="text-[9px] font-bold bg-indigo-600/20 hover:bg-indigo-600/40 border border-indigo-500/40 text-indigo-300 px-1.5 py-1 rounded-lg transition flex items-center gap-1"
+            >
+              <span className="text-[8px] font-black bg-indigo-600 text-white px-1 rounded">v{v.num}</span>
+              <span>@{v.handle}</span>
+            </button>
+          ))}
+        </span>
       ))}
       {showToggle && (
         <button
@@ -816,7 +906,7 @@ function prepareCast(rawCast) {
     const o = { ...c };
     o.portraits = normalizePortraits(o, `cast:${o.id}`);
     delete o.imageUrl;
-    return o;
+    return ensureVariants(o, `cast:${o.id}`);
   });
 }
 function defaultLook() {
@@ -875,7 +965,7 @@ function loadCharacterPresets() {
         const o = { ...c };
         o.portraits = normalizePortraits(o, `char:${o.id}`);
         delete o.imageUrl;
-        return o;
+        return ensureVariants(o, `char:${o.id}`);
       });
       next = withHandles(next);
       const changed = next.some((p, i) =>
@@ -980,7 +1070,9 @@ export default function DDCDirectorStudio() {
   const [newProjectName, setNewProjectName] = useState('');
   const [renamingId, setRenamingId] = useState(null);
   const [renameValue, setRenameValue] = useState('');
-  const [charForm, setCharForm] = useState(null); // null | {id?, name, handle, ...CHAR_ALL_FIELDS, imageUrl}
+  const [charForm, setCharForm] = useState(null); // null | {id?, name, handle, ...CHAR_ALL_FIELDS, portraits, variants}
+  const [charVariantTab, setCharVariantTab] = useState('base'); // 'base' | variant id — editor only
+  const [variantPortraitVid, setVariantPortraitVid] = useState(null); // variant id with portrait prompt open — editor only
   const [atQuery, setAtQuery] = useState(null); // { key, query, atPos } — type-@ autocomplete tracking
   const [portraitOpenId, setPortraitOpenId] = useState(null); // character preset id with portrait editor open
   const [rosterCat, setRosterCat] = useState('all'); // built-in roster category filter
@@ -1273,7 +1365,11 @@ export default function DDCDirectorStudio() {
   const clonePresetForCast = async (preset) => {
     const castId = 'c' + Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36);
     const portraits = await clonePortraitSlots(preset.portraits, `cast:${castId}`);
-    const copy = { ...preset, id: castId, presetId: preset.id, portraits };
+    const variants = await Promise.all((preset.variants || []).map(async (v) => ({
+      ...v,
+      portraits: await clonePortraitSlots(v.portraits, variantBlobPrefix(`cast:${castId}`, v.id)),
+    })));
+    const copy = { ...preset, id: castId, presetId: preset.id, portraits, variants };
     delete copy.imageUrl;
     return copy;
   };
@@ -1282,10 +1378,18 @@ export default function DDCDirectorStudio() {
     const copy = await clonePresetForCast(preset);
     writeCast([...cast, copy]);
   };
+  const setVariantCastPortraits = (charId, vid, slots) => {
+    const next = cast.map(c => c.id === charId
+      ? { ...c, variants: (c.variants || []).map(v => v.id === vid ? { ...v, portraits: slots } : v) }
+      : c);
+    writeCast(next);
+  };
   const removeFromCast = (charId) => {
     if (cast.length <= 1) return;
     if (!window.confirm('Remove this character from this project?')) return;
-    for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) deletePortraitBlob(castPortraitKey(charId, i));
+    const doomed = cast.find(c => c.id === charId);
+    if (doomed) deleteCharBlobs(doomed, `cast:${charId}`);
+    else for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) deletePortraitBlob(castPortraitKey(charId, i));
     const next = cast.filter(c => c.id !== charId);
     const l = look.characterId === charId ? { ...look, characterId: next[0].id } : look;
     setCast(next);
@@ -1296,17 +1400,39 @@ export default function DDCDirectorStudio() {
     if (characterPresets.some(p => p.name === char.name && (p.notes || '') === (char.notes || ''))) return;
     const newId = 'ch' + Date.now().toString(36);
     const portraits = await clonePortraitSlots(char.portraits, `char:${newId}`);
+    const variants = await Promise.all((char.variants || []).map(async (v) => ({
+      ...v,
+      portraits: await clonePortraitSlots(v.portraits, variantBlobPrefix(`char:${newId}`, v.id)),
+    })));
     const preset = {
       id: newId, name: char.name,
-      ...pickCharFields(char), portraits,
+      ...pickCharFields(char), portraits, variants,
     };
     persistCharacterPresets([preset, ...characterPresets]);
   };
 
   /* ------------------------- character presets (global library) ------------------------- */
+  // Every @handle in play: character handles + all variant sub-handles.
+  const takenHandles = (excludeCharId, excludeVariantId) => {
+    const s = new Set();
+    characterPresets.forEach(p => {
+      if (p.id !== excludeCharId && p.handle) s.add(p.handle.toLowerCase());
+      (p.variants || []).forEach(v => {
+        if (v.id !== excludeVariantId && v.handle) s.add(v.handle.toLowerCase());
+      });
+    });
+    return s;
+  };
   const uniqueHandle = (base, selfId) => {
     let h = ((base || '').trim() || deriveHandle('')).slice(0, 24) || 'actor';
-    const taken = new Set(characterPresets.filter(p => p.id !== selfId).map(p => (p.handle || '').toLowerCase()));
+    const taken = takenHandles(selfId, null);
+    let u = h, n = 2;
+    while (taken.has(u.toLowerCase())) u = h + (n++);
+    return u;
+  };
+  const uniqueVariantHandle = (base, charId, variantId) => {
+    let h = ((base || '').trim() || 'actor').slice(0, 24) || 'actor';
+    const taken = takenHandles(charId, variantId);
     let u = h, n = 2;
     while (taken.has(u.toLowerCase())) u = h + (n++);
     return u;
@@ -1314,11 +1440,16 @@ export default function DDCDirectorStudio() {
   const savePresetForm = () => {
     if (!charForm || !charForm.name.trim()) return;
     const handle = uniqueHandle(charForm.handle || deriveHandle(charForm.name), charForm.id);
+    const variants = (charForm.variants || []).map((v, i) => ({
+      ...v,
+      handle: uniqueVariantHandle(v.handle || deriveVariantHandle(handle, v.label, i + 2), charForm.id, v.id),
+      portraits: v.portraits,
+    }));
     let next;
-    if (charForm.id) {
+    if (charForm.id && characterPresets.some(p => p.id === charForm.id)) {
       next = characterPresets.map(p => {
         if (p.id !== charForm.id) return p;
-        const merged = { ...p, ...charForm, name: charForm.name.trim(), handle, portraits: charForm.portraits };
+        const merged = { ...p, ...charForm, name: charForm.name.trim(), handle, portraits: charForm.portraits, variants };
         delete merged.face; delete merged.outfit; delete merged.styleNotes; // legacy blob keys never return
         delete merged.imageUrl;
         return merged;
@@ -1326,15 +1457,52 @@ export default function DDCDirectorStudio() {
     } else {
       next = [{
         id: charForm.id || 'ch' + Date.now().toString(36), name: charForm.name.trim(), handle,
-        ...pickCharFields(charForm), portraits: charForm.portraits,
+        ...pickCharFields(charForm), portraits: charForm.portraits, variants,
       }, ...characterPresets];
     }
     persistCharacterPresets(next);
     setCharForm(null);
   };
+  /* ------------------------- character variant (sub-character) editing ------------------------- */
+  const openCharForm = (form) => { setCharForm(form); setCharVariantTab('base'); setVariantPortraitVid(null); };
+  const setVariantField = (vid, key, value) => {
+    setCharForm((prev) => prev ? {
+      ...prev,
+      variants: (prev.variants || []).map(v => v.id === vid ? { ...v, [key]: value } : v),
+    } : prev);
+  };
+  const setVariantPortraits = (vid, slots) => {
+    setCharForm((prev) => prev ? {
+      ...prev,
+      variants: (prev.variants || []).map(v => v.id === vid ? { ...v, portraits: slots } : v),
+    } : prev);
+  };
+  const addCharVariant = () => {
+    if (!charForm) return;
+    const vid = 'v' + Date.now().toString(36);
+    const num = (charForm.variants || []).length + 2;
+    const baseHandle = charForm.handle || deriveHandle(charForm.name);
+    const v = {
+      id: vid, label: '',
+      handle: uniqueVariantHandle(deriveVariantHandle(baseHandle, '', num), charForm.id, vid),
+      ...pickCharFields(charForm),
+      portraits: DEFAULT_SLOT_LABELS.map((label, i) => ({ label, key: `char:${charForm.id}:v${vid}:${i}`, url: null })),
+    };
+    setCharForm({ ...charForm, variants: [...(charForm.variants || []), v] });
+    setCharVariantTab(vid);
+  };
+  const deleteCharVariant = (vid) => {
+    if (!charForm || !window.confirm('Delete this version? Its reference photos go too.')) return;
+    const v = (charForm.variants || []).find(x => x.id === vid);
+    if (v) for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) deletePortraitBlob(`char:${charForm.id}:v${vid}:${i}`);
+    setCharForm({ ...charForm, variants: (charForm.variants || []).filter(x => x.id !== vid) });
+    setCharVariantTab('base');
+  };
   const deletePreset = (id) => {
     if (!window.confirm('Delete this character preset?')) return;
-    for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) deletePortraitBlob(charPortraitKey(id, i));
+    const doomed = characterPresets.find(p => p.id === id);
+    if (doomed) deleteCharBlobs(doomed, `char:${id}`);
+    else for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) deletePortraitBlob(charPortraitKey(id, i));
     persistCharacterPresets(characterPresets.filter(p => p.id !== id));
   };
   // Copies a built-in roster character into her library (fresh id + unique handle).
@@ -1348,6 +1516,7 @@ export default function DDCDirectorStudio() {
       name: preset.name, handle,
       ...pickCharFields(preset),
       portraits: normalizePortraits(preset, `char:${newId}`),
+      variants: [],
     };
     const next = [entry, ...characterPresets];
     persistCharacterPresets(next);
@@ -1361,8 +1530,23 @@ export default function DDCDirectorStudio() {
     ? characterPresets
     : (castForMentions.length ? castForMentions : characterPresets);
   const isCastPool = !mentionShowAll && castForMentions.length > 0;
+  // Flat @-autocomplete entries: every character handle + every variant sub-handle.
+  const suggestPool = [];
+  mentionPool.forEach((c) => {
+    const baseH = c.handle || deriveHandle(c.name);
+    if (baseH) suggestPool.push({ id: c.id + ':v1', handle: baseH });
+    (Array.isArray(c.variants) ? c.variants : []).forEach((v) => {
+      if (v.handle) suggestPool.push({ id: c.id + ':' + v.id, handle: v.handle });
+    });
+  });
+  const withVariantBtns = (c) => ({
+    ...c,
+    _variantBtns: (Array.isArray(c.variants) ? c.variants : []).map((v, j) => ({
+      handle: v.handle || '', label: v.label || `Version ${j + 2}`, num: j + 2,
+    })).filter(v => v.handle),
+  });
   const mentionBarProps = {
-    presets: isCastPool ? mentionPool.map((c, i) => ({ ...c, _castNum: i + 1 })) : mentionPool,
+    presets: isCastPool ? mentionPool.map((c, i) => ({ ...withVariantBtns(c), _castNum: i + 1 })) : mentionPool.map(withVariantBtns),
     showAll: mentionShowAll,
     showToggle: true,
     onToggleShowAll: () => setMentionShowAll(v => !v),
@@ -1375,25 +1559,30 @@ export default function DDCDirectorStudio() {
     if (!text) return '';
     const seen = new Set();
     const found = [];
+    const esc = (h) => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     [...castForMentions, ...characterPresets].forEach((c) => {
-      const h = c.handle || deriveHandle(c.name);
-      if (!h || seen.has(h.toLowerCase())) return;
-      const re = new RegExp('@' + h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?!\\w)');
-      if (re.test(text)) { seen.add(h.toLowerCase()); found.push(c); }
+      charActors(c).forEach((a) => {
+        const h = a.handle || deriveHandle(a.name);
+        if (!h || seen.has(h.toLowerCase())) return;
+        const re = new RegExp('@' + esc(h) + '(?!\\w)');
+        if (re.test(text)) { seen.add(h.toLowerCase()); found.push(a); }
+      });
     });
     found.sort((a, b) => {
-      const ai = cast.findIndex(c => c.id === a.id); const bi = cast.findIndex(c => c.id === b.id);
-      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+      const ai = cast.findIndex(c => c.id === a._charId); const bi = cast.findIndex(c => c.id === b._charId);
+      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi) || a._variantNum - b._variantNum;
     });
     if (!found.length) return '';
-    const parts = found.map(c => {
-      const n = cast.findIndex(x => x.id === c.id) + 1;
-      const h = c.handle || deriveHandle(c.name);
-      if (n < 1) return `@${h}`;
-      const refs = (Array.isArray(c.portraits) ? c.portraits : [])
-        .map((sl, i) => (sl && sl.url ? `${n}${SLOT_LETTERS[i]}` : null))
+    const parts = found.map(a => {
+      const n = cast.findIndex(x => x.id === a._charId) + 1;
+      const refs = (Array.isArray(a.portraits) ? a.portraits : [])
+        .map((sl, i) => (sl && sl.url ? `${a._variantNum}${SLOT_LETTERS[i]}` : null))
         .filter(Boolean);
-      return refs.length ? `Character ${n} (@${h}) [refs ${refs.join(', ')}]` : `Character ${n} (@${h})`;
+      const refStr = refs.length ? ` [refs ${refs.join(', ')}]` : '';
+      if (n < 1) return `@${a.handle}${refStr}`;
+      // "Character 1, variant Young (@odetteYoung) [refs 1A, 1C]"
+      const vtag = a._variantNum > 1 ? `, variant ${a._variantLabel}` : '';
+      return `Character ${n}${vtag} (@${a.handle})${refStr}`;
     });
     return `Characters: ${parts.join(' · ')}`;
   };
@@ -1476,16 +1665,19 @@ export default function DDCDirectorStudio() {
   const expandMentions = (text) => {
     if (!text || typeof text !== 'string') return text;
     let out = text;
-    // library first, then cast members (deduped by handle) so cast-only handles resolve too
+    // library first, then cast members (deduped by handle) so cast-only handles resolve too;
+    // each variant sub-handle (@odetteYoung) expands to that variant's description
     const seen = new Set();
     [...characterPresets, ...castForMentions].forEach((c) => {
-      const h = c.handle || deriveHandle(c.name);
-      if (!h) return;
-      const key = h.toLowerCase();
-      if (seen.has(key)) return;
-      seen.add(key);
-      const re = new RegExp('@' + h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?!\\w)', 'g');
-      out = out.replace(re, () => describeChar(c));
+      charActors(c).forEach((a) => {
+        const h = a.handle || deriveHandle(a.name);
+        if (!h) return;
+        const key = h.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        const re = new RegExp('@' + h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?!\\w)', 'g');
+        out = out.replace(re, () => describeChar(a));
+      });
     });
     return out;
   };
@@ -2689,7 +2881,7 @@ export default function DDCDirectorStudio() {
                       onKeyUp={(e) => detectAt(e, 'broll')}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500" />
                     {atQuery && atQuery.key === 'broll' && (
-                      <AtSuggestRow query={atQuery.query} presets={mentionPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'brollPrompt', 'prompt-broll-' + scene.id, 'broll', h)} />
+                      <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'brollPrompt', 'prompt-broll-' + scene.id, 'broll', h)} />
                     )}
                   </div>
                   <div className="space-y-2">
@@ -2705,7 +2897,7 @@ export default function DDCDirectorStudio() {
                       onKeyUp={(e) => detectAt(e, 'lipsync')}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500" />
                     {atQuery && atQuery.key === 'lipsync' && (
-                      <AtSuggestRow query={atQuery.query} presets={mentionPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'lipsyncPrompt', 'prompt-lipsync-' + scene.id, 'lipsync', h)} />
+                      <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'lipsyncPrompt', 'prompt-lipsync-' + scene.id, 'lipsync', h)} />
                     )}
                   </div>
                   <div className="space-y-2">
@@ -2721,7 +2913,7 @@ export default function DDCDirectorStudio() {
                       onKeyUp={(e) => detectAt(e, 'videop')}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-purple-500" />
                     {atQuery && atQuery.key === 'videop' && (
-                      <AtSuggestRow query={atQuery.query} presets={mentionPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'videoPrompt', 'prompt-video-' + scene.id, 'videop', h)} />
+                      <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'videoPrompt', 'prompt-video-' + scene.id, 'videop', h)} />
                     )}
                   </div>
                 </div>
@@ -3110,7 +3302,7 @@ export default function DDCDirectorStudio() {
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-emerald-500"
                     />
                     {atQuery && atQuery.key === ('img-' + s.id) && (
-                      <AtSuggestRow query={atQuery.query} presets={mentionPool} onPick={(h) => pickAtSuggestion(i, 'approvedPrompt', 'prompt-img-' + s.id, 'img-' + s.id, h)} />
+                      <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(i, 'approvedPrompt', 'prompt-img-' + s.id, 'img-' + s.id, h)} />
                     )}
                   </div>
                 ))}
@@ -3223,7 +3415,7 @@ export default function DDCDirectorStudio() {
                             className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-emerald-500"
                           />
                           {atQuery && atQuery.key === ('vid-' + s.id) && (
-                            <AtSuggestRow query={atQuery.query} presets={mentionPool} onPick={(h) => pickAtSuggestion(i, 'videoPrompt', 'prompt-vid-' + s.id, 'vid-' + s.id, h)} />
+                            <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(i, 'videoPrompt', 'prompt-vid-' + s.id, 'vid-' + s.id, h)} />
                           )}
                           <div className="flex gap-2">
                             <button
@@ -3315,7 +3507,7 @@ export default function DDCDirectorStudio() {
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
                     />
                     {atQuery && atQuery.key === ('bible-' + s.id) && (
-                      <AtSuggestRow query={atQuery.query} presets={mentionPool} onPick={(h) => pickAtSuggestion(i, 'biblePrompt', 'prompt-bible-' + s.id, 'bible-' + s.id, h)} />
+                      <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(i, 'biblePrompt', 'prompt-bible-' + s.id, 'bible-' + s.id, h)} />
                     )}
                   </div>
                 ))}
@@ -3457,7 +3649,7 @@ export default function DDCDirectorStudio() {
           <div className="space-y-4 animate-fadeIn">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-bold text-white">Character library</h2>
-              <button onClick={() => { const nid = 'ch' + Date.now().toString(36); setCharForm({ id: nid, name: '', handle: '', skinTone: '', build: '', faceShape: '', marks: '', hair: '', headwear: '', mood: '', artStyle: '', wardrobe: '', accessories: '', notes: '', portraits: DEFAULT_SLOT_LABELS.map((label, i) => ({ label, key: charPortraitKey(nid, i), url: null })) }); }} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded-xl flex items-center space-x-1.5 transition">
+              <button onClick={() => { const nid = 'ch' + Date.now().toString(36); openCharForm({ id: nid, name: '', handle: '', skinTone: '', build: '', faceShape: '', marks: '', hair: '', headwear: '', mood: '', artStyle: '', wardrobe: '', accessories: '', notes: '', variants: [], portraits: DEFAULT_SLOT_LABELS.map((label, i) => ({ label, key: charPortraitKey(nid, i), url: null })) }); }} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded-xl flex items-center space-x-1.5 transition">
                 <Plus className="w-3.5 h-3.5" /><span>New</span>
               </button>
             </div>
@@ -3479,6 +3671,34 @@ export default function DDCDirectorStudio() {
                     />
                   </div>
                 ))}
+                <div>
+                  <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Versions <span className="text-slate-600 normal-case">(young / old / alternate looks — each gets its own 4 angles)</span></label>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      onClick={() => setCharVariantTab('base')}
+                      className={`text-[10px] font-bold px-2.5 py-1.5 rounded-lg border transition ${charVariantTab === 'base' ? 'bg-cyan-600 border-cyan-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'}`}
+                    >
+                      Base
+                    </button>
+                    {(charForm.variants || []).map((v, i) => (
+                      <button
+                        key={v.id}
+                        onClick={() => setCharVariantTab(v.id)}
+                        className={`text-[10px] font-bold px-2.5 py-1.5 rounded-lg border transition ${charVariantTab === v.id ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'}`}
+                      >
+                        {v.label || `V${i + 2}`}
+                      </button>
+                    ))}
+                    <button
+                      onClick={addCharVariant}
+                      className="text-[10px] font-bold px-2.5 py-1.5 rounded-lg border border-dashed border-slate-600 text-slate-400 hover:text-white hover:border-slate-400 transition"
+                    >
+                      + Version
+                    </button>
+                  </div>
+                </div>
+                {charVariantTab === 'base' ? (
+                <>
                 <details className="bg-slate-950/60 border border-slate-800 rounded-xl" open>
                   <summary className="cursor-pointer px-3 py-2.5 text-[11px] font-bold uppercase tracking-wider text-cyan-300 list-none flex items-center justify-between">
                     <span>Details — skin, build, face, hair, wardrobe…</span>
@@ -3513,6 +3733,91 @@ export default function DDCDirectorStudio() {
                     onChange={(slots) => setCharForm((prev) => prev ? { ...prev, portraits: slots } : prev)}
                   />
                 </div>
+                </>
+                ) : (
+                (() => {
+                  const vlist = charForm.variants || [];
+                  const v = vlist.find(x => x.id === charVariantTab);
+                  if (!v) return null;
+                  const num = vlist.findIndex(x => x.id === v.id) + 2;
+                  const actor = actorView(charForm, v, num);
+                  return (
+                    <div className="space-y-3 bg-indigo-950/20 border border-indigo-900/50 rounded-xl p-3">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Version name</label>
+                          <input
+                            type="text" value={v.label || ''} placeholder="Young, Old…"
+                            onChange={(e) => setVariantField(v.id, 'label', e.target.value)}
+                            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">@sub-handle</label>
+                          <input
+                            type="text" value={v.handle || ''}
+                            onChange={(e) => setVariantField(v.id, 'handle', e.target.value)}
+                            placeholder="@odetteYoung"
+                            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white font-mono focus:border-indigo-500 focus:outline-none"
+                          />
+                        </div>
+                      </div>
+                      {CHAR_DETAIL_FIELDS.map(([k, label]) => (
+                        <div key={k}>
+                          <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">{label}</label>
+                          <input
+                            type="text" value={v[k] || ''} onChange={(e) => setVariantField(v.id, k, e.target.value)}
+                            className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                          />
+                        </div>
+                      ))}
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Notes</label>
+                        <textarea
+                          rows={2} value={v.notes || ''} onChange={(e) => setVariantField(v.id, 'notes', e.target.value)}
+                          placeholder="What makes this version different…"
+                          className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">
+                          Reference photos <span className="text-indigo-300">{num}A–{num}D</span> <span className="text-slate-600 normal-case">(this version's angles — tap a label to rename it)</span>
+                        </label>
+                        <PortraitSlots
+                          slots={v.portraits}
+                          keyPrefix={`char:${charForm.id}:v${v.id}`}
+                          castNumber={num}
+                          fileHandle={`${charForm.handle || charForm.name || 'character'}-${v.label || 'version'}`}
+                          onChange={(slots) => setVariantPortraits(v.id, slots)}
+                        />
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={() => setVariantPortraitVid(variantPortraitVid === v.id ? null : v.id)}
+                          className="text-[10px] font-bold bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-300 px-2.5 py-1.5 rounded-lg transition"
+                        >
+                          Portrait prompt — {v.label || 'this version'}
+                        </button>
+                        <button
+                          onClick={() => deleteCharVariant(v.id)}
+                          className="text-[10px] font-bold bg-slate-800 hover:bg-red-900/40 border border-slate-700 text-slate-400 hover:text-red-300 px-2.5 py-1.5 rounded-lg transition"
+                        >
+                          Delete version
+                        </button>
+                      </div>
+                      {variantPortraitVid === v.id && (
+                        <PortraitPromptBox
+                          char={{ ...actor, id: 'vp-' + v.id }}
+                          defaultText={compilePortraitPrompt(actor)}
+                          copyText={copyText}
+                          copyFeedback={copyFeedback}
+                          onClose={() => setVariantPortraitVid(null)}
+                        />
+                      )}
+                    </div>
+                  );
+                })()
+                )}
                 <div className="flex gap-2">
                   <button onClick={savePresetForm} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-2 rounded-lg transition">Save</button>
                   <button onClick={() => setCharForm(null)} className="text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 px-4 py-2 rounded-lg transition">Cancel</button>
@@ -3550,7 +3855,7 @@ export default function DDCDirectorStudio() {
                         >
                           Portrait prompt
                         </button>
-                        <button onClick={() => setCharForm({ ...p, portraits: normalizePortraits(p, `char:${p.id}`) })} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded transition">Edit</button>
+                        <button onClick={() => { const shaped = ensureVariants({ ...p, portraits: normalizePortraits(p, `char:${p.id}`) }, `char:${p.id}`); openCharForm(shaped); }} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded transition">Edit</button>
                         <button onClick={() => deletePreset(p.id)} className="text-[10px] bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-300 px-2 py-1 rounded transition">Delete</button>
                       </div>
                     </div>
@@ -3564,6 +3869,20 @@ export default function DDCDirectorStudio() {
                       onChange={(slots) => persistCharacterPresets(characterPresets.map(x => x.id === p.id ? { ...x, portraits: slots } : x))}
                     />
                   </div>
+                  {(p.variants || []).map((v, vi) => (
+                    <div key={v.id} className="mt-3">
+                      <p className="text-[9px] uppercase font-bold text-slate-500 mb-1.5">
+                        {v.label || `Version ${vi + 2}`} <span className="text-indigo-300">@{v.handle}</span> <span className="text-indigo-300">{vi + 2}A–{vi + 2}D</span>
+                      </p>
+                      <PortraitSlots
+                        slots={v.portraits}
+                        keyPrefix={`char:${p.id}:v${v.id}`}
+                        castNumber={vi + 2}
+                        fileHandle={`${p.handle || p.name}-${v.label || 'version'}`}
+                        onChange={(slots) => persistCharacterPresets(characterPresets.map(x => x.id === p.id ? { ...x, variants: (x.variants || []).map(y => y.id === v.id ? { ...y, portraits: slots } : y) } : x))}
+                      />
+                    </div>
+                  ))}
                   {portraitOpenId === p.id && (
                     <PortraitPromptBox
                       char={p}
@@ -3810,19 +4129,35 @@ export default function DDCDirectorStudio() {
                         </div>
                       </div>
                     </div>
-                    <div className="mt-3">
-                      <p className="text-[9px] uppercase font-bold text-slate-500 mb-1.5">Reference photos <span className="text-cyan-400">{ci + 1}A–{ci + 1}D</span></p>
-                      <PortraitSlots
-                        slots={char.portraits}
-                        keyPrefix={`cast:${char.id}`}
-                        castNumber={ci + 1}
-                        fileHandle={char.handle || char.name}
-                        onChange={(slots) => {
-                          const next = cast.map(c => c.id === char.id ? { ...c, portraits: slots } : c);
-                          setCast(next);
-                          writeActiveProject(project, lyricsText, segments, next, null, null);
-                        }}
-                      />
+                    <div className="mt-3 space-y-3">
+                      <div>
+                        <p className="text-[9px] uppercase font-bold text-slate-500 mb-1.5">Reference photos <span className="text-slate-600 normal-case">(base)</span> <span className="text-cyan-400">1A–1D</span></p>
+                        <PortraitSlots
+                          slots={char.portraits}
+                          keyPrefix={`cast:${char.id}`}
+                          castNumber={1}
+                          fileHandle={char.handle || char.name}
+                          onChange={(slots) => {
+                            const next = cast.map(c => c.id === char.id ? { ...c, portraits: slots } : c);
+                            setCast(next);
+                            writeActiveProject(project, lyricsText, segments, next, null, null);
+                          }}
+                        />
+                      </div>
+                      {(char.variants || []).map((v, vi) => (
+                        <div key={v.id}>
+                          <p className="text-[9px] uppercase font-bold text-slate-500 mb-1.5">
+                            {v.label || `Version ${vi + 2}`} <span className="text-indigo-300">@{v.handle}</span> <span className="text-indigo-300">{vi + 2}A–{vi + 2}D</span>
+                          </p>
+                          <PortraitSlots
+                            slots={v.portraits}
+                            keyPrefix={`cast:${char.id}:v${v.id}`}
+                            castNumber={vi + 2}
+                            fileHandle={`${char.handle || char.name}-${v.label || 'version'}`}
+                            onChange={(slots) => setVariantCastPortraits(char.id, v.id, slots)}
+                          />
+                        </div>
+                      ))}
                     </div>
                   </div>
                 ))}
