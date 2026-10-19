@@ -2221,7 +2221,14 @@ export default function DDCDirectorStudio() {
     const sceneList = segments
       .map(s => `${fmtClock(s.startTime)}–${fmtClock(s.endTime)} [${s.title}]: ${s.lyrics}`)
       .join('\n');
-    return `Song: "${project.title}"${project.artist ? ` by ${project.artist}` : ''}. Duration: ${audio ? fmtClock(audio.duration) : 'unknown'}. ${segments.length} scenes.\n\nTimestamped lyrics:\n${sceneList}\n\nLocked look for reference — style: ${lockedStyle.name} (${lockedStyle.descriptor}); palette: ${lockedPalette.name} (${lockedPalette.mood}); character: ${describeChar(lockedChar)}; world: ${lockedTheme.name} (${lockedTheme.notes}).`;
+    const castBlock = cast.length
+      ? `Cast — feature ALL ${cast.length} of these characters (the 🌟 Lead is the protagonist; every other character must have a real part in the story, true to their role):\n` + cast.map((c, i) => {
+          const rd = roleDef(c.role);
+          const roleTxt = rd ? `${rd.emoji} ${rd.label}` : 'Ensemble';
+          return `${i + 1}. ${c.name} (${c.handle || '@' + c.id}) — ${roleTxt}: ${charSummary(c)}`;
+        }).join('\n')
+      : 'Cast: none assigned yet.';
+    return `Song: "${project.title}"${project.artist ? ` by ${project.artist}` : ''}. Duration: ${audio ? fmtClock(audio.duration) : 'unknown'}. ${segments.length} scenes.\n\nTimestamped lyrics:\n${sceneList}\n\n${castBlock}\n\nLocked look for reference — style: ${lockedStyle.name} (${lockedStyle.descriptor}); palette: ${lockedPalette.name} (${lockedPalette.mood}); lead character: ${describeChar(lockedChar)}; world: ${lockedTheme.name} (${lockedTheme.notes}).`;
   };
   const handleGenerateThemeOnly = async () => {
     if (!segments.length) { setThemeError('Slice your song into intervals first (Step 2).'); return; }
@@ -2231,7 +2238,7 @@ export default function DDCDirectorStudio() {
       const content = await pollinationsChat([
         {
           role: 'system',
-          content: 'You are a music video director. Given a song\'s timestamped lyrics, invent ONLY the visual world for its music video — visual style, color palette, mood, cinematography, wardrobe. 3-5 vivid, specific sentences. Reply with ONLY valid JSON: {"theme": "..."}.',
+          content: 'You are a music video director. Given a song\'s timestamped lyrics and its full cast, invent ONLY the visual world for its music video — visual style, color palette, mood, cinematography, wardrobe. The world must suit every cast member, not just the lead. 3-5 vivid, specific sentences. Reply with ONLY valid JSON: {"theme": "..."}.',
         },
         { role: 'user', content: themeStoryContext() },
       ]);
@@ -2254,7 +2261,7 @@ export default function DDCDirectorStudio() {
       const content = await pollinationsChat([
         {
           role: 'system',
-          content: 'You are a music video director. Given a song\'s timestamped lyrics and the video\'s visual theme, write the narrative arc of the music video across the song, referencing the sections by name. 4-6 sentences. Reply with ONLY valid JSON: {"storyline": "..."}.',
+          content: 'You are a music video director. Given a song\'s timestamped lyrics, its visual theme, and its full cast, write the narrative arc of the music video across the song, referencing the sections by name. Every cast member must appear in the story with a part that fits their role — never write a storyline about the lead alone. 4-6 sentences. Reply with ONLY valid JSON: {"storyline": "..."}.',
         },
         { role: 'user', content: themeStoryContext() + (themeCtx ? `\n\nCurrent visual theme (stay consistent with it):\n${themeCtx}` : '') },
       ]);
