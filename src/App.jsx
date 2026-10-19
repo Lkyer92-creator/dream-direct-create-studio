@@ -2000,6 +2000,122 @@ export default function DDCDirectorStudio() {
     });
   };
 
+  /* ------------------------- insert / delete scenes ------------------------- */
+  // A blank scene shell with the same shape buildSegments produces.
+  const makeSceneShell = (index, n, start, end) => {
+    const title = defaultTitle(index, n);
+    const len = Math.max(0.1, end - start);
+    return {
+      id: `scene-custom-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      sceneNumber: index + 1,
+      title,
+      startTime: start,
+      endTime: end,
+      duration: len,
+      customTimes: true,
+      energyLevel: defaultEnergy(title),
+      lyrics: '',
+      lyricsLocked: false,
+      shotType: (index % 2 === 0 ? 'Lip sync' : 'Motion clip'),
+      lipSyncEnabled: index % 2 === 0,
+      characterAction: (index % 2 === 0 ? 'Stands looking into lens' : 'Runs through dark alleyway'),
+      cameraAngle: (index % 2 === 0 ? 'Close-up' : 'Tracking shot'),
+      cameraMovement: (index % 2 === 0 ? 'Dolly in' : 'Handheld'),
+      setting: 'Subterranean rain alley',
+      lightingMood: 'High-contrast cyan rim lights',
+      approvedPrompt: '',
+      keyframeImageUrl: null,
+      imageName: '',
+      reviewStatus: 'pending',
+      brollPrompt: '',
+      lipsyncPrompt: '',
+      videoPrompt: '',
+      biblePrompt: '',
+      videoGen: { status: 'idle' },
+      clipUrl: null,
+      clipName: '',
+      trimStart: 0,
+      trimEnd: len,
+    };
+  };
+
+  const renumberScenes = (list) => list.map((s, i) => ({ ...s, sceneNumber: i + 1 }));
+
+  // Insert a new scene at position atIndex (0..segments.length). The "+" on a row
+  // inserts right after that row; the list-end button appends.
+  const insertScene = (atIndex) => {
+    const iv = Math.max(1, currentInterval() || 15);
+    const dur = audio && typeof audio.duration === 'number' ? audio.duration : null;
+    let start;
+    if (!segments.length) start = 0;
+    else if (atIndex <= 0) start = 0;
+    else start = segments[Math.min(atIndex - 1, segments.length - 1)].endTime;
+    start = Math.max(0, start);
+    if (dur != null) start = Math.min(start, dur);
+    let end = start + iv;
+    if (dur != null) end = Math.min(end, dur);
+    if (!(end > start)) return; // guard: no room left in the song
+    const idx = Math.max(0, Math.min(atIndex, segments.length));
+    const fresh = makeSceneShell(idx, segments.length + 1, start, end);
+    setSegments(prev => {
+      const next = renumberScenes([...prev.slice(0, idx), fresh, ...prev.slice(idx)]);
+      persist(project, lyricsText, next);
+      return next;
+    });
+  };
+
+  const deleteScene = (index) => {
+    const s = segments[index];
+    if (!s) return;
+    if (!window.confirm(`Delete ${sceneTag(s)}? Its lyrics, prompts and uploads go with it. This can't be undone.`)) return;
+    if (index === activeSceneIndex) pauseAudio();
+    ['clipUrl', 'keyframeImageUrl'].forEach((k) => {
+      const u = s[k];
+      if (u && String(u).startsWith('blob:')) { try { URL.revokeObjectURL(u); } catch (e) {} }
+    });
+    const newLen = segments.length - 1;
+    setSelectedSceneIndex(prev => {
+      if (newLen <= 0) return 0;
+      if (prev === index) return Math.min(index, newLen - 1);
+      return prev > index ? prev - 1 : prev;
+    });
+    setSegments(prev => {
+      const next = renumberScenes(prev.filter((_, i) => i !== index));
+      persist(project, lyricsText, next);
+      return next;
+    });
+  };
+
+  // Small per-row "+" (insert after) and trash buttons, shared by the three lists.
+  const renderSceneRowActions = (index) => (
+    <div className="flex items-center gap-1 flex-shrink-0">
+      <button
+        onClick={() => insertScene(index + 1)}
+        title="Add a scene after this one"
+        className="w-7 h-7 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-400 flex items-center justify-center transition"
+      >
+        <Plus className="w-3.5 h-3.5" />
+      </button>
+      <button
+        onClick={() => deleteScene(index)}
+        title="Delete this scene"
+        className="w-7 h-7 rounded-lg bg-slate-800 hover:bg-red-900/60 text-slate-400 hover:text-red-400 flex items-center justify-center transition"
+      >
+        <Trash2 className="w-3.5 h-3.5" />
+      </button>
+    </div>
+  );
+
+  const renderAddSceneButton = () => (
+    <button
+      onClick={() => insertScene(segments.length)}
+      className="w-full p-3 border-2 border-dashed border-slate-700 hover:border-cyan-500 rounded-xl text-xs font-bold text-slate-400 hover:text-cyan-300 flex items-center justify-center space-x-2 transition"
+    >
+      <Plus className="w-4 h-4" />
+      <span>Add scene</span>
+    </button>
+  );
+
   /* ------------------------- Director: theme + storyline (Pollinations text) ------------------------- */
   const handleGenerateTheme = async () => {
     if (!segments.length) { setThemeError('Slice your song into intervals first (Step 2).'); return; }
@@ -2856,12 +2972,14 @@ export default function DDCDirectorStudio() {
                       <span>Design</span>
                       <ChevronRight className="w-3 h-3" />
                     </button>
+                    <div className="ml-2 flex-shrink-0">{renderSceneRowActions(idx)}</div>
                   </div>
                   {renderTimeEditor(idx, seg)}
                   {renderSectionLabelEditor(idx, seg)}
                   {renderLyricsEditor(idx, seg)}
                 </div>
               ))}
+              {renderAddSceneButton()}
             </div>
           </div>
         )}
@@ -3274,6 +3392,7 @@ export default function DDCDirectorStudio() {
                         {s.keyframeImageUrl && (
                           <span className="text-[9px] font-bold bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-800">STILL</span>
                         )}
+                        <div className="ml-auto">{renderSceneRowActions(i)}</div>
                       </div>
                       {renderTimeEditor(i, s)}
                       {renderSectionLabelEditor(i, s)}
@@ -3281,6 +3400,7 @@ export default function DDCDirectorStudio() {
                     </div>
                   ))}
                 </div>
+                {renderAddSceneButton()}
                 <DirectorContinue next={3}>Continue to sections</DirectorContinue>
               </div>
             )}
@@ -3301,6 +3421,7 @@ export default function DDCDirectorStudio() {
                         <span className="text-[10px] font-black text-slate-300">{sceneTag(s)}</span>
                         <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
                         <SectionBadge title={s.title} />
+                        <div className="ml-auto">{renderSceneRowActions(i)}</div>
                       </div>
                       {renderTimeEditor(i, s)}
                       {renderSectionLabelEditor(i, s)}
@@ -3308,6 +3429,7 @@ export default function DDCDirectorStudio() {
                     </div>
                   ))}
                 </div>
+                {renderAddSceneButton()}
                 {!segments.length && (
                   <p className="text-xs text-slate-500 bg-slate-900/60 border border-slate-800 rounded-xl p-4 text-center">
                     No scenes yet — start at Step 1 with your song.
