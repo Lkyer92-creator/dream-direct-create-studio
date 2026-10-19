@@ -4,8 +4,9 @@ import {
   ChevronRight, Clapperboard, Video, Scissors, Zap, X,
   MonitorPlay, FastForward, DownloadCloud, Cpu, CheckCircle, Upload,
   Mic, Clock, AlertTriangle, Loader2, Trash2, Plus, Wand2, FileAudio, BookOpen,
-  Layers, Users, AudioLines, Palette,
+  Layers, Users, AudioLines, Palette, AtSign,
 } from 'lucide-react';
+import { BUILTIN_CHARACTER_PRESETS, BUILTIN_CATEGORIES } from './characterPresets.js';
 
 /* ============================== FREE TRANSCRIPTION ============================== */
 // Lyric transcription runs free in Google Colab (open-source Whisper on a free GPU).
@@ -286,15 +287,105 @@ const DEFAULT_STYLES = [
 const DEFAULT_CHARACTERS = [
   {
     id: 'char-1', name: 'Kaelen (Lead)',
-    face: '24-year-old androgynous artist with sharp cheekbones, piercing hazel eyes',
-    hair: 'Textured jet-black wavy fringe undercut',
-    outfit: 'Oversized distressed charcoal bomber jacket with neon orange lining',
+    skinTone: 'warm olive skin', build: 'tall and wiry, 6\'0"', faceShape: 'sharp cheekbones, angular',
+    marks: 'piercing hazel eyes', hair: 'Textured jet-black wavy fringe undercut', headwear: '',
+    mood: 'intense, magnetic', artStyle: 'cinematic photorealism',
+    wardrobe: 'Oversized distressed charcoal bomber jacket with neon orange lining', accessories: '', notes: '',
     imageUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80'
   }
 ];
 const DEFAULT_THEMES = [
   { id: 'thm-1', name: 'Subterranean Neon Club & Rain Alley', notes: 'Bioluminescent low-ceiling concrete corridors, rain-drenched neon alleys with water reflections' }
 ];
+
+/* Character @mention handles — short tags like @actorAva that expand to the full
+   character description at copy/compile time. */
+function deriveHandle(name) {
+  const words = ((name || '').replace(/[^a-zA-Z0-9 ]/g, ' ')).split(/\s+/).filter(Boolean);
+  if (!words.length) return 'actor';
+  const first = words[0].toLowerCase();
+  const rest = words.slice(1).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('');
+  return (first + rest).slice(0, 24) || 'actor';
+}
+function withHandles(arr) {
+  const used = new Set();
+  return (arr || []).map((p) => {
+    let base = (((p.handle || '') + '').trim() || deriveHandle(p.name)).slice(0, 24) || 'actor';
+    let u = base, n = 2;
+    while (used.has(u.toLowerCase())) u = base + (n++);
+    used.add(u.toLowerCase());
+    return { ...p, handle: u };
+  });
+}
+/* Structured character fields: name, handle, skinTone, build, faceShape, marks,
+   hair, headwear, mood, artStyle, wardrobe, accessories, notes.
+   charSummary assembles them into one image-prompt-ready description;
+   describeChar is what @mentions expand to. Legacy single-blob fields
+   (face/outfit/styleNotes) are still read as a fallback for old saves. */
+function charSummary(c) {
+  const bits = [];
+  const phys = [c.skinTone, c.build].filter(Boolean).join(', ');
+  if (phys) bits.push(phys);
+  const faceBits = [c.faceShape ? `${c.faceShape} face` : '', c.marks].filter(Boolean).join(', ');
+  if (faceBits) bits.push(faceBits);
+  if (c.hair) bits.push(`hair: ${c.hair}`);
+  if (c.headwear) bits.push(`headwear: ${c.headwear}`);
+  const wear = [c.wardrobe, c.accessories].filter(Boolean).join(' + ');
+  if (wear) bits.push(`wearing ${wear}`);
+  if (c.mood) bits.push(`mood: ${c.mood}`);
+  if (c.artStyle) bits.push(`${c.artStyle} style`);
+  return bits.join('; ');
+}
+function describeChar(c) {
+  const name = c.name || 'Character';
+  if (MODERN_KEYS.some(k => c[k])) {
+    const summary = charSummary(c);
+    let s = summary ? `${name} — ${summary}` : name;
+    if (c.notes) s += (summary ? '. ' : ' — ') + c.notes;
+    return s;
+  }
+  // legacy fallback for pre-structured saves
+  const parts = [c.face, c.hair ? `hair: ${c.hair}` : '', c.outfit ? `wearing ${c.outfit}` : '', c.styleNotes || ''].filter(Boolean).join(', ');
+  return `${name} — ${parts}`;
+}
+/* Short blurb for card subtitles (no name prefix). */
+function charBlurb(c) {
+  return charSummary(c) || [c.face, c.styleNotes].filter(Boolean).join(' — ');
+}
+/* Detail fields for the character editor form (label pairs). */
+const CHAR_DETAIL_FIELDS = [
+  ['skinTone', 'Skin tone'],
+  ['build', 'Build / size'],
+  ['faceShape', 'Face shape'],
+  ['marks', 'Marks — freckles, scars, tattoos, piercings'],
+  ['hair', 'Hair'],
+  ['headwear', 'Headwear — hats etc.'],
+  ['mood', 'Mood / expression'],
+  ['artStyle', 'Art style'],
+  ['wardrobe', 'Wardrobe'],
+  ['accessories', 'Accessories'],
+];
+const CHAR_ALL_FIELDS = ['skinTone', 'build', 'faceShape', 'marks', 'hair', 'headwear', 'mood', 'artStyle', 'wardrobe', 'accessories', 'notes'];
+/* Fields that exist ONLY in the new shape ('hair' is shared with the legacy blob). */
+const MODERN_KEYS = ['skinTone', 'build', 'faceShape', 'marks', 'headwear', 'mood', 'artStyle', 'wardrobe', 'accessories', 'notes'];
+function pickCharFields(src) {
+  const o = {};
+  CHAR_ALL_FIELDS.forEach(k => { o[k] = src[k] || ''; });
+  return o;
+}
+/* Maps a pre-structured (old blob) character into the new field shape.
+   Old description is preserved in `notes` — no data loss. */
+function migrateCharShape(p) {
+  const c = { ...p };
+  const isOld = c.face !== undefined || c.outfit !== undefined || c.styleNotes !== undefined;
+  const hasNew = MODERN_KEYS.some(k => c[k]);
+  if (isOld && !hasNew) {
+    const desc = [c.face, c.hair ? `Hair: ${c.hair}` : '', c.outfit ? `Wearing ${c.outfit}` : '', c.styleNotes || ''].filter(Boolean).join(' ');
+    c.notes = [desc, c.notes].filter(Boolean).join(' ').trim();
+    delete c.face; delete c.outfit; delete c.styleNotes; delete c.hair; // old blob fully folded into notes
+  }
+  return c;
+}
 
 const SECTION_ORDER = ['Intro', 'Verse 1', 'Pre-Chorus', 'Chorus', 'Verse 2', 'Chorus', 'Bridge', 'Final Chorus'];
 /* Editable section labels — the auto-guess from defaultTitle is only the starting value;
@@ -354,6 +445,93 @@ const SectionBadge = ({ title }) => {
   );
 };
 
+/* One-tap @mention insert bar — sits above every prompt textarea.
+   Shows the open project's cast first; the "All" toggle swaps in the full library. */
+function MentionBar({ presets, onPick, showAll, onToggleShowAll, showToggle }) {
+  if (!presets || !presets.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5 items-center">
+      <span className="text-[9px] uppercase font-bold text-slate-500 flex items-center gap-1"><AtSign className="w-3 h-3" />Character:</span>
+      {presets.map(p => (
+        <button
+          key={p.id}
+          onClick={() => onPick(p.handle)}
+          className="text-[10px] font-bold bg-cyan-600/20 hover:bg-cyan-600/40 border border-cyan-500/40 text-cyan-300 px-2 py-1 rounded-lg transition"
+        >
+          @{p.handle}
+        </button>
+      ))}
+      {showToggle && (
+        <button
+          onClick={onToggleShowAll}
+          className={`text-[9px] font-bold px-2 py-1 rounded-lg border transition ${showAll ? 'bg-cyan-600 border-cyan-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-300'}`}
+          title={showAll ? 'Show only this project\'s cast' : 'Show the full character library'}
+        >
+          {showAll ? 'Cast' : 'All'}
+        </button>
+      )}
+    </div>
+  );
+}
+/* Inline autocomplete row shown while typing @name in a prompt field. */
+function AtSuggestRow({ query, presets, onPick }) {
+  const matches = (presets || []).filter(p => (p.handle || '').toLowerCase().startsWith((query || '').toLowerCase())).slice(0, 6);
+  if (!matches.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5 items-center bg-slate-950 border border-cyan-800 rounded-lg p-2">
+      <AtSign className="w-3 h-3 text-cyan-400 flex-shrink-0" />
+      {matches.map(p => (
+        <button
+          key={p.id}
+          onClick={() => onPick(p.handle)}
+          className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-200 px-2 py-1 rounded-lg transition"
+        >
+          @{p.handle}
+        </button>
+      ))}
+    </div>
+  );
+}
+/* Editable portrait-prompt panel per character (Fooocus). */
+function PortraitPromptBox({ char, defaultText, copyText, copyFeedback, onClose }) {
+  const [draft, setDraft] = React.useState(defaultText);
+  const dirty = draft !== defaultText;
+  const label = 'portrait-' + char.id;
+  return (
+    <div className="mt-3 bg-slate-950 border border-indigo-900/60 rounded-xl p-3 space-y-2">
+      <div className="flex justify-between items-center">
+        <label className="text-[10px] uppercase font-bold text-indigo-300">Portrait prompt <span className="text-slate-500 normal-case">(Fooocus)</span></label>
+        <button onClick={onClose} className="text-slate-500 hover:text-slate-300 transition" aria-label="Close portrait prompt">
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </div>
+      <textarea
+        rows={6}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
+      />
+      <div className="flex gap-2">
+        <button
+          onClick={() => copyText(label, draft)}
+          className="text-[10px] font-bold bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg flex items-center space-x-1 transition"
+        >
+          {copyFeedback === label ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+          <span>{copyFeedback === label ? 'Copied' : 'Copy prompt'}</span>
+        </button>
+        {dirty && (
+          <button
+            onClick={() => setDraft(defaultText)}
+            className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 rounded-lg transition"
+          >
+            Reset
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function loadSavedProject() {
   try {
     const raw = localStorage.getItem(LS_PROJECT);
@@ -386,7 +564,7 @@ function blankRecord(id, name) {
     project: { title: name, artist: '', intervalSeconds: 15, customSeconds: 20, themeText: '', storylineText: '' },
     lyricsText: '', scenes: [],
     audioSongId: null, audioName: '', audioDuration: 0,
-    cast: seedCast(), look: defaultLook(),
+    cast: withHandles(seedCast()), look: defaultLook(),
   };
 }
 function writeIndex(index) {
@@ -425,9 +603,19 @@ function loadCharacterPresets() {
   try {
     const raw = localStorage.getItem(LS_CHARACTERS);
     const arr = raw ? JSON.parse(raw) : null;
-    if (Array.isArray(arr) && arr.length) return arr;
+    if (Array.isArray(arr) && arr.length) {
+      // migrate any pre-structured (old blob) saves: description -> notes
+      let next = arr.map(migrateCharShape);
+      next = withHandles(next);
+      const changed = next.some((p, i) =>
+        p.handle !== arr[i].handle || p.notes !== arr[i].notes || p.face !== arr[i].face);
+      if (changed) {
+        try { localStorage.setItem(LS_CHARACTERS, JSON.stringify(next)); } catch (e) {}
+      }
+      return next;
+    }
   } catch (e) { /* fall through */ }
-  return seedCast();
+  return withHandles(seedCast());
 }
 function loadLooks() {
   try {
@@ -516,7 +704,13 @@ export default function DDCDirectorStudio() {
   const [newProjectName, setNewProjectName] = useState('');
   const [renamingId, setRenamingId] = useState(null);
   const [renameValue, setRenameValue] = useState('');
-  const [charForm, setCharForm] = useState(null); // null | {id?, name, face, hair, outfit, styleNotes, imageUrl}
+  const [charForm, setCharForm] = useState(null); // null | {id?, name, handle, ...CHAR_ALL_FIELDS, imageUrl}
+  const [atQuery, setAtQuery] = useState(null); // { key, query, atPos } — type-@ autocomplete tracking
+  const [portraitOpenId, setPortraitOpenId] = useState(null); // character preset id with portrait editor open
+  const [rosterCat, setRosterCat] = useState('all'); // built-in roster category filter
+  const [rosterOpen, setRosterOpen] = useState(false); // built-in roster collapsed by default
+  const [castSearch, setCastSearch] = useState(''); // searchable cast picker filter
+  const [mentionShowAll, setMentionShowAll] = useState(false); // @mention bar: cast-first vs full library
   const [lookName, setLookName] = useState('');
 
   const charFallback = { id: 'char-fallback', name: 'Lead', face: 'lead performer', hair: '', outfit: 'stage outfit', imageUrl: '' };
@@ -792,10 +986,10 @@ export default function DDCDirectorStudio() {
     writeActiveProject(project, lyricsText, segments, next, l, null);
   };
   const saveCastToLibrary = (char) => {
-    if (characterPresets.some(p => p.name === char.name && p.face === char.face)) return;
+    if (characterPresets.some(p => p.name === char.name && (p.notes || '') === (char.notes || ''))) return;
     const preset = {
-      id: 'ch' + Date.now().toString(36), name: char.name, face: char.face, hair: char.hair,
-      outfit: char.outfit, styleNotes: char.styleNotes || '', imageUrl: char.imageUrl || '',
+      id: 'ch' + Date.now().toString(36), name: char.name,
+      ...pickCharFields(char), imageUrl: char.imageUrl || '',
     };
     const next = [preset, ...characterPresets];
     setCharacterPresets(next);
@@ -803,16 +997,28 @@ export default function DDCDirectorStudio() {
   };
 
   /* ------------------------- character presets (global library) ------------------------- */
+  const uniqueHandle = (base, selfId) => {
+    let h = ((base || '').trim() || deriveHandle('')).slice(0, 24) || 'actor';
+    const taken = new Set(characterPresets.filter(p => p.id !== selfId).map(p => (p.handle || '').toLowerCase()));
+    let u = h, n = 2;
+    while (taken.has(u.toLowerCase())) u = h + (n++);
+    return u;
+  };
   const savePresetForm = () => {
     if (!charForm || !charForm.name.trim()) return;
+    const handle = uniqueHandle(charForm.handle || deriveHandle(charForm.name), charForm.id);
     let next;
     if (charForm.id) {
-      next = characterPresets.map(p => p.id === charForm.id ? { ...p, ...charForm } : p);
+      next = characterPresets.map(p => {
+        if (p.id !== charForm.id) return p;
+        const merged = { ...p, ...charForm, name: charForm.name.trim(), handle };
+        delete merged.face; delete merged.outfit; delete merged.styleNotes; // legacy blob keys never return
+        return merged;
+      });
     } else {
       next = [{
-        id: 'ch' + Date.now().toString(36), name: charForm.name.trim(),
-        face: charForm.face || '', hair: charForm.hair || '', outfit: charForm.outfit || '',
-        styleNotes: charForm.styleNotes || '', imageUrl: charForm.imageUrl || '',
+        id: 'ch' + Date.now().toString(36), name: charForm.name.trim(), handle,
+        ...pickCharFields(charForm), imageUrl: charForm.imageUrl || '',
       }, ...characterPresets];
     }
     setCharacterPresets(next);
@@ -825,6 +1031,43 @@ export default function DDCDirectorStudio() {
     setCharacterPresets(next);
     try { localStorage.setItem(LS_CHARACTERS, JSON.stringify(next)); } catch (e) {}
   };
+  // Copies a built-in roster character into her library (fresh id + unique handle).
+  const addBuiltinPreset = (preset) => {
+    if (characterPresets.some(p => p.builtinId === preset.id)) return;
+    const handle = uniqueHandle(preset.handle || deriveHandle(preset.name), null);
+    const entry = {
+      id: 'ch' + Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36),
+      builtinId: preset.id,
+      name: preset.name, handle,
+      ...pickCharFields(preset), imageUrl: '',
+    };
+    const next = [entry, ...characterPresets];
+    setCharacterPresets(next);
+    try { localStorage.setItem(LS_CHARACTERS, JSON.stringify(next)); } catch (e) {}
+  };
+  const builtinInLibrary = (preset) => characterPresets.some(p => p.builtinId === preset.id);
+  const rosterShown = rosterCat === 'all' ? BUILTIN_CHARACTER_PRESETS : BUILTIN_CHARACTER_PRESETS.filter(p => p.category === rosterCat);
+  /* Per-project casting for the @mention bar: the open project's cast comes first
+     (handles normalized), falling back to the full library when no cast is set. */
+  const castForMentions = withHandles(cast.map(c => ({ ...c })));
+  const mentionPool = mentionShowAll
+    ? characterPresets
+    : (castForMentions.length ? castForMentions : characterPresets);
+  const mentionBarProps = {
+    presets: mentionPool,
+    showAll: mentionShowAll,
+    showToggle: true,
+    onToggleShowAll: () => setMentionShowAll(v => !v),
+  };
+  /* Searchable cast picker list: full library minus cast members, filtered by query. */
+  const castPickerList = (() => {
+    const q = (castSearch || '').trim().toLowerCase();
+    return characterPresets.filter(p => {
+      if (cast.some(c => c.presetId === p.id)) return false;
+      if (!q) return true;
+      return ((p.name || '') + ' ' + (p.handle || '')).toLowerCase().includes(q);
+    });
+  })();
   // "Use" drops the preset into the open project's cast and makes it the star.
   const usePreset = (preset) => {
     let c = cast.find(x => x.presetId === preset.id);
@@ -866,28 +1109,106 @@ export default function DDCDirectorStudio() {
 
   /* ------------------------- prompt compilers ------------------------- */
   const compilePromptForScene = (scene) => {
-    return `Cinematic music video, ${lockedStyle.descriptor}. Character: ${lockedChar.name}, wearing ${lockedChar.outfit}. Setting: ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}. Camera: ${scene.cameraAngle}, ${scene.cameraMovement}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. 9:16 vertical.`;
+    return `Cinematic music video, ${lockedStyle.descriptor}. Character: ${describeChar(lockedChar)}. Setting: ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}. Camera: ${scene.cameraAngle}, ${scene.cameraMovement}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. 9:16 vertical.`;
   };
   const compileBrollPrompt = (scene) => {
     return `B-roll cutaway, cinematic music video, ${lockedStyle.descriptor}. No lip sync — pure atmosphere and texture. Setting: ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}. Camera: ${scene.cameraAngle}, slow ${scene.cameraMovement.toLowerCase()}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, 9:16 vertical.`;
   };
   const compileLipSyncPrompt = (scene) => {
-    return `Extreme close-up lip sync shot, cinematic music video. Character: ${lockedChar.name}, ${lockedChar.face}, wearing ${lockedChar.outfit}, singing directly into the lens, emotive, mouth forming the lyric "${scene.lyrics}". Camera: intimate close-up, subtle slow dolly in. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, shallow depth of field, 9:16 vertical.`;
+    return `Extreme close-up lip sync shot, cinematic music video. Character: ${describeChar(lockedChar)}, singing directly into the lens, emotive, mouth forming the lyric "${scene.lyrics}". Camera: intimate close-up, subtle slow dolly in. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, shallow depth of field, 9:16 vertical.`;
   };
   const compileVideoPrompt = (scene) => {
-    return `${scene.characterAction}, ${scene.cameraMovement.toLowerCase()} camera move, ${scene.cameraAngle.toLowerCase()}. Setting: ${scene.setting || lockedTheme.notes}. Lighting: ${scene.lightingMood}. Character: ${lockedChar.name} wearing ${lockedChar.outfit}. Colors: [${lockedPalette.hexes.join(', ')}]. Cinematic photorealistic motion, smooth natural movement, 9:16 vertical video.`;
+    return `${scene.characterAction}, ${scene.cameraMovement.toLowerCase()} camera move, ${scene.cameraAngle.toLowerCase()}. Setting: ${scene.setting || lockedTheme.notes}. Lighting: ${scene.lightingMood}. Character: ${describeChar(lockedChar)}. Colors: [${lockedPalette.hexes.join(', ')}]. Cinematic photorealistic motion, smooth natural movement, 9:16 vertical video.`;
   };
   // Full DIY production prompt for the Bible: paste into Runway / Kling yourself.
   const compileBiblePrompt = (scene) => {
-    const charLine = `Character: ${lockedChar.name} — ${lockedChar.face}, ${lockedChar.hair}, wearing ${lockedChar.outfit}.`;
+    const charLine = `Character: ${describeChar(lockedChar)}.`;
     const sceneLine = `Scene (${scene.title}): ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}.`;
     const camLine = `Camera angle: ${scene.cameraAngle}. Camera movement: ${scene.cameraMovement}.`;
     const lookLine = `Lighting and mood: ${scene.lightingMood}. Palette: [${lockedPalette.hexes.join(', ')}]. Style: ${lockedStyle.descriptor}.`;
     const syncLine = scene.lipSyncEnabled
       ? ` LIP SYNC DIRECTIONS: extreme close-up on the character's face, singing directly into the lens for the full shot — mouth and lip movements must visibly match the lyric being sung: "${scene.lyrics}". Keep the face centered, sharp, and in focus the entire time; subtle slow dolly-in, no cuts away from the face.`
       : '';
-    const diyLine = ` Wardrobe continuity: same outfit (${lockedChar.outfit}) in every shot; keep the character's face identical across all scenes. Vertical 9:16, photorealistic cinematic music video. Lyric for this shot: "${scene.lyrics}".`;
+    const diyLine = ` Wardrobe continuity: same wardrobe (${lockedChar.wardrobe || lockedChar.outfit || 'signature outfit'}) in every shot; keep the character's face identical across all scenes. Vertical 9:16, photorealistic cinematic music video. Lyric for this shot: "${scene.lyrics}".`;
     return `${charLine} ${sceneLine} ${camLine} ${lookLine}${syncLine}${diyLine}`;
+  };
+
+  /* ------------------------- @mention engine ------------------------- */
+  // Expands @handle tokens into the character's full description at copy/compile time.
+  const expandMentions = (text) => {
+    if (!text || typeof text !== 'string') return text;
+    let out = text;
+    // library first, then cast members (deduped by handle) so cast-only handles resolve too
+    const seen = new Set();
+    [...characterPresets, ...castForMentions].forEach((c) => {
+      const h = c.handle || deriveHandle(c.name);
+      if (!h) return;
+      const key = h.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      const re = new RegExp('@' + h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?!\\w)', 'g');
+      out = out.replace(re, () => describeChar(c));
+    });
+    return out;
+  };
+  // Standalone Fooocus prompt for generating one character's reference portrait.
+  const compilePortraitPrompt = (p) => {
+    const h = p.handle || deriveHandle(p.name);
+    const desc = charSummary(p) || [p.face, p.hair ? `Hair: ${p.hair}` : '', p.outfit ? `Wearing ${p.outfit}` : '', p.styleNotes || ''].filter(Boolean).join(' ');
+    const notesLine = p.notes ? `\n\nNotes: ${p.notes}` : '';
+    return `Character portrait reference for ${p.name} (@${h}) — generate in Fooocus, then upload it as this character's portrait.\n\n${desc}${notesLine}\n\nArt style: ${lockedStyle.descriptor}. Palette mood: ${lockedPalette.mood} [${lockedPalette.hexes.join(', ')}]. World: ${lockedTheme.name} — ${lockedTheme.notes}.\n\nFraming: clean character reference, neutral mid-gray background, upper body, facing the camera, neutral expression, consistent facial features, even studio lighting, photorealistic, high detail, 9:16 vertical.`;
+  };
+  // Inserts "@handle " into a prompt textarea at the cursor (or appends).
+  const insertMention = (sceneIndex, field, textareaId, baseText, handle) => {
+    const token = '@' + handle + ' ';
+    const el = document.getElementById(textareaId);
+    let cur = baseText || '';
+    let pos = cur.length;
+    if (el && document.activeElement === el && typeof el.selectionStart === 'number') {
+      cur = el.value;
+      pos = el.selectionStart;
+    }
+    const next = cur.slice(0, pos) + token + cur.slice(pos);
+    updateScene(sceneIndex, { [field]: next });
+    setAtQuery(null);
+    const newPos = pos + token.length;
+    requestAnimationFrame(() => {
+      const el2 = document.getElementById(textareaId);
+      if (el2) { el2.focus(); try { el2.setSelectionRange(newPos, newPos); } catch (e) {} }
+    });
+  };
+  // Tracks "@..." typed right before the cursor to show the autocomplete row.
+  const detectAt = (e, key) => {
+    const el = e.target;
+    const pos = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
+    const m = el.value.slice(0, pos).match(/@(\w*)$/);
+    if (m) setAtQuery({ key, query: m[1].toLowerCase(), atPos: pos - m[0].length });
+    else setAtQuery((q) => (q && q.key === key ? null : q));
+  };
+  // Replaces the typed "@query" with the picked "@handle ".
+  const pickAtSuggestion = (sceneIndex, field, textareaId, key, handle) => {
+    const q = atQuery;
+    const el = document.getElementById(textareaId);
+    const token = '@' + handle + ' ';
+    let cur = '', atPos = 0;
+    if (el && q && q.key === key) {
+      cur = el.value;
+      atPos = q.atPos;
+    } else if (el) {
+      cur = el.value;
+      atPos = cur.length;
+    }
+    const after = cur.slice(atPos);
+    const m = after.match(/^@\w*/);
+    const endPos = atPos + (m ? m[0].length : 0);
+    const next = cur.slice(0, atPos) + token + cur.slice(endPos);
+    updateScene(sceneIndex, { [field]: next });
+    setAtQuery(null);
+    const newPos = atPos + token.length;
+    requestAnimationFrame(() => {
+      const el2 = document.getElementById(textareaId);
+      if (el2) { el2.focus(); try { el2.setSelectionRange(newPos, newPos); } catch (e) {} }
+    });
   };
 
   /* ------------------------- segment builder ------------------------- */
@@ -1122,7 +1443,7 @@ export default function DDCDirectorStudio() {
         },
         {
           role: 'user',
-          content: `Song: "${project.title}"${project.artist ? ` by ${project.artist}` : ''}. Duration: ${audio ? fmtClock(audio.duration) : 'unknown'}. ${segments.length} scenes.\n\nTimestamped lyrics:\n${sceneList}\n\nLocked look for reference — style: ${lockedStyle.name} (${lockedStyle.descriptor}); palette: ${lockedPalette.name} (${lockedPalette.mood}); character: ${lockedChar.name} — ${lockedChar.face}, ${lockedChar.hair}, wearing ${lockedChar.outfit}; world: ${lockedTheme.name} (${lockedTheme.notes}).`,
+          content: `Song: "${project.title}"${project.artist ? ` by ${project.artist}` : ''}. Duration: ${audio ? fmtClock(audio.duration) : 'unknown'}. ${segments.length} scenes.\n\nTimestamped lyrics:\n${sceneList}\n\nLocked look for reference — style: ${lockedStyle.name} (${lockedStyle.descriptor}); palette: ${lockedPalette.name} (${lockedPalette.mood}); character: ${describeChar(lockedChar)}; world: ${lockedTheme.name} (${lockedTheme.notes}).`,
         },
       ]);
       const { theme, storyline } = parseThemeStoryline(content);
@@ -1301,7 +1622,7 @@ export default function DDCDirectorStudio() {
       `SCENE ${s.sceneNumber} — ${fmtClock(s.startTime)}–${fmtClock(s.endTime)} (${s.title})${s.lipSyncEnabled ? ' [LIP SYNC]' : ''}\n` +
       `Lyrics: ${s.lyrics}\n` +
       `Image: ${s.imageName || (s.keyframeImageUrl ? 'uploaded still' : '(no image uploaded yet)')}\n` +
-      `Production prompt: ${s.biblePrompt || compileBiblePrompt(s)}`
+      `Production prompt: ${expandMentions(s.biblePrompt || compileBiblePrompt(s))}`
     )).join('\n\n---\n\n');
     copyText('bible-all', text || 'No scenes yet.');
   };
@@ -1311,7 +1632,7 @@ export default function DDCDirectorStudio() {
     const text = segments.map(s => (
       `SCENE ${s.sceneNumber} — ${fmtClock(s.startTime)}–${fmtClock(s.endTime)} (${s.title})${s.lipSyncEnabled ? ' [LIP SYNC]' : ''}\n` +
       `Lyrics: ${s.lyrics}\n` +
-      `Image prompt: ${s.approvedPrompt || compilePromptForScene(s)}`
+      `Image prompt: ${expandMentions(s.approvedPrompt || compilePromptForScene(s))}`
     )).join('\n\n---\n\n');
     copyText('imgprompts-all', text || 'No scenes yet.');
   };
@@ -2012,35 +2333,50 @@ export default function DDCDirectorStudio() {
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
                       <label className="text-xs font-bold text-slate-300">B-roll prompt <span className="text-slate-500 font-normal">(atmosphere cutaway)</span></label>
-                      <button onClick={() => copyText('broll', scene.brollPrompt || compileBrollPrompt(scene))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
+                      <button onClick={() => copyText('broll', expandMentions(scene.brollPrompt || compileBrollPrompt(scene)))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
                         {copyFeedback === 'broll' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'broll' ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
-                    <textarea rows={3} value={scene.brollPrompt || compileBrollPrompt(scene)}
-                      onChange={(e) => updateScene(selectedSceneIndex, { brollPrompt: e.target.value })}
+                    <MentionBar {...mentionBarProps} onPick={(h) => insertMention(selectedSceneIndex, 'brollPrompt', 'prompt-broll-' + scene.id, scene.brollPrompt || compileBrollPrompt(scene), h)} />
+                    <textarea id={'prompt-broll-' + scene.id} rows={3} value={scene.brollPrompt || compileBrollPrompt(scene)}
+                      onChange={(e) => { updateScene(selectedSceneIndex, { brollPrompt: e.target.value }); detectAt(e, 'broll'); }}
+                      onKeyUp={(e) => detectAt(e, 'broll')}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500" />
+                    {atQuery && atQuery.key === 'broll' && (
+                      <AtSuggestRow query={atQuery.query} presets={mentionPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'brollPrompt', 'prompt-broll-' + scene.id, 'broll', h)} />
+                    )}
                   </div>
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
                       <label className="text-xs font-bold text-slate-300">Lip sync prompt <span className="text-slate-500 font-normal">(close-up performance)</span></label>
-                      <button onClick={() => copyText('lipsync', scene.lipsyncPrompt || compileLipSyncPrompt(scene))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
+                      <button onClick={() => copyText('lipsync', expandMentions(scene.lipsyncPrompt || compileLipSyncPrompt(scene)))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
                         {copyFeedback === 'lipsync' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'lipsync' ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
-                    <textarea rows={3} value={scene.lipsyncPrompt || compileLipSyncPrompt(scene)}
-                      onChange={(e) => updateScene(selectedSceneIndex, { lipsyncPrompt: e.target.value })}
+                    <MentionBar {...mentionBarProps} onPick={(h) => insertMention(selectedSceneIndex, 'lipsyncPrompt', 'prompt-lipsync-' + scene.id, scene.lipsyncPrompt || compileLipSyncPrompt(scene), h)} />
+                    <textarea id={'prompt-lipsync-' + scene.id} rows={3} value={scene.lipsyncPrompt || compileLipSyncPrompt(scene)}
+                      onChange={(e) => { updateScene(selectedSceneIndex, { lipsyncPrompt: e.target.value }); detectAt(e, 'lipsync'); }}
+                      onKeyUp={(e) => detectAt(e, 'lipsync')}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500" />
+                    {atQuery && atQuery.key === 'lipsync' && (
+                      <AtSuggestRow query={atQuery.query} presets={mentionPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'lipsyncPrompt', 'prompt-lipsync-' + scene.id, 'lipsync', h)} />
+                    )}
                   </div>
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
                       <label className="text-xs font-bold text-slate-300">Image → video prompt <span className="text-slate-500 font-normal">(paste into Runway)</span></label>
-                      <button onClick={() => copyText('videop', scene.videoPrompt || compileVideoPrompt(scene))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
+                      <button onClick={() => copyText('videop', expandMentions(scene.videoPrompt || compileVideoPrompt(scene)))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
                         {copyFeedback === 'videop' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'videop' ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
-                    <textarea rows={3} value={scene.videoPrompt || compileVideoPrompt(scene)}
-                      onChange={(e) => updateScene(selectedSceneIndex, { videoPrompt: e.target.value })}
+                    <MentionBar {...mentionBarProps} onPick={(h) => insertMention(selectedSceneIndex, 'videoPrompt', 'prompt-video-' + scene.id, scene.videoPrompt || compileVideoPrompt(scene), h)} />
+                    <textarea id={'prompt-video-' + scene.id} rows={3} value={scene.videoPrompt || compileVideoPrompt(scene)}
+                      onChange={(e) => { updateScene(selectedSceneIndex, { videoPrompt: e.target.value }); detectAt(e, 'videop'); }}
+                      onKeyUp={(e) => detectAt(e, 'videop')}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-purple-500" />
+                    {atQuery && atQuery.key === 'videop' && (
+                      <AtSuggestRow query={atQuery.query} presets={mentionPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'videoPrompt', 'prompt-video-' + scene.id, 'videop', h)} />
+                    )}
                   </div>
                 </div>
 
@@ -2411,19 +2747,25 @@ export default function DDCDirectorStudio() {
                     <div className="flex justify-between items-center">
                       <label className="text-[10px] uppercase font-bold text-slate-400">Text-to-image prompt <span className="text-slate-600 normal-case">(Fooocus)</span></label>
                       <button
-                        onClick={() => copyText('imgp-' + s.id, s.approvedPrompt || compilePromptForScene(s))}
+                        onClick={() => copyText('imgp-' + s.id, expandMentions(s.approvedPrompt || compilePromptForScene(s)))}
                         className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-emerald-400 px-2 py-1 rounded flex items-center space-x-1 transition"
                       >
                         {copyFeedback === ('imgp-' + s.id) ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                         <span>{copyFeedback === ('imgp-' + s.id) ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
+                    <MentionBar {...mentionBarProps} onPick={(h) => insertMention(i, 'approvedPrompt', 'prompt-img-' + s.id, s.approvedPrompt || compilePromptForScene(s), h)} />
                     <textarea
+                      id={'prompt-img-' + s.id}
                       rows={4}
                       value={s.approvedPrompt || compilePromptForScene(s)}
-                      onChange={(e) => updateScene(i, { approvedPrompt: e.target.value })}
+                      onChange={(e) => { updateScene(i, { approvedPrompt: e.target.value }); detectAt(e, 'img-' + s.id); }}
+                      onKeyUp={(e) => detectAt(e, 'img-' + s.id)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-emerald-500"
                     />
+                    {atQuery && atQuery.key === ('img-' + s.id) && (
+                      <AtSuggestRow query={atQuery.query} presets={mentionPool} onPick={(h) => pickAtSuggestion(i, 'approvedPrompt', 'prompt-img-' + s.id, 'img-' + s.id, h)} />
+                    )}
                   </div>
                 ))}
                 {!segments.length && (
@@ -2525,12 +2867,18 @@ export default function DDCDirectorStudio() {
                         </div>
                         <div className="flex-1 min-w-0 space-y-2">
                           <label className="text-[10px] uppercase font-bold text-slate-400">Video concept <span className="text-slate-600 normal-case">(for your video generator)</span></label>
+                          <MentionBar {...mentionBarProps} onPick={(h) => insertMention(i, 'videoPrompt', 'prompt-vid-' + s.id, s.videoPrompt || compileVideoPrompt(s), h)} />
                           <textarea
+                            id={'prompt-vid-' + s.id}
                             rows={4}
                             value={s.videoPrompt || compileVideoPrompt(s)}
-                            onChange={(e) => updateScene(i, { videoPrompt: e.target.value })}
+                            onChange={(e) => { updateScene(i, { videoPrompt: e.target.value }); detectAt(e, 'vid-' + s.id); }}
+                            onKeyUp={(e) => detectAt(e, 'vid-' + s.id)}
                             className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-emerald-500"
                           />
+                          {atQuery && atQuery.key === ('vid-' + s.id) && (
+                            <AtSuggestRow query={atQuery.query} presets={mentionPool} onPick={(h) => pickAtSuggestion(i, 'videoPrompt', 'prompt-vid-' + s.id, 'vid-' + s.id, h)} />
+                          )}
                           <div className="flex gap-2">
                             <button
                               onClick={() => updateScene(i, { reviewStatus: status === 'approved' ? 'pending' : 'approved' })}
@@ -2601,19 +2949,25 @@ export default function DDCDirectorStudio() {
                     <div className="flex justify-between items-center">
                       <label className="text-[10px] uppercase font-bold text-slate-400">Production prompt <span className="text-slate-600 normal-case">(your video generator)</span></label>
                       <button
-                        onClick={() => copyText('bible-' + s.id, s.biblePrompt || compileBiblePrompt(s))}
+                        onClick={() => copyText('bible-' + s.id, expandMentions(s.biblePrompt || compileBiblePrompt(s)))}
                         className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition"
                       >
                         {copyFeedback === ('bible-' + s.id) ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                         <span>{copyFeedback === ('bible-' + s.id) ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
+                    <MentionBar {...mentionBarProps} onPick={(h) => insertMention(i, 'biblePrompt', 'prompt-bible-' + s.id, s.biblePrompt || compileBiblePrompt(s), h)} />
                     <textarea
+                      id={'prompt-bible-' + s.id}
                       rows={6}
                       value={s.biblePrompt || compileBiblePrompt(s)}
-                      onChange={(e) => updateScene(i, { biblePrompt: e.target.value })}
+                      onChange={(e) => { updateScene(i, { biblePrompt: e.target.value }); detectAt(e, 'bible-' + s.id); }}
+                      onKeyUp={(e) => detectAt(e, 'bible-' + s.id)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
                     />
+                    {atQuery && atQuery.key === ('bible-' + s.id) && (
+                      <AtSuggestRow query={atQuery.query} presets={mentionPool} onPick={(h) => pickAtSuggestion(i, 'biblePrompt', 'prompt-bible-' + s.id, 'bible-' + s.id, h)} />
+                    )}
                   </div>
                 ))}
                 {!segments.length && (
@@ -2754,7 +3108,7 @@ export default function DDCDirectorStudio() {
           <div className="space-y-4 animate-fadeIn">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-bold text-white">Character library</h2>
-              <button onClick={() => setCharForm({ name: '', face: '', hair: '', outfit: '', styleNotes: '', imageUrl: '' })} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded-xl flex items-center space-x-1.5 transition">
+              <button onClick={() => setCharForm({ name: '', handle: '', skinTone: '', build: '', faceShape: '', marks: '', hair: '', headwear: '', mood: '', artStyle: '', wardrobe: '', accessories: '', notes: '', imageUrl: '' })} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded-xl flex items-center space-x-1.5 transition">
                 <Plus className="w-3.5 h-3.5" /><span>New</span>
               </button>
             </div>
@@ -2762,15 +3116,45 @@ export default function DDCDirectorStudio() {
             {charForm && (
               <div className="bg-slate-900/80 border border-cyan-900 rounded-2xl p-4 space-y-3">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-cyan-300">{charForm.id ? 'Edit character' : 'New character'}</h3>
-                {[['name', 'Name'], ['face', 'Face'], ['hair', 'Hair'], ['outfit', 'Outfit'], ['styleNotes', 'Style notes']].map(([k, label]) => (
+                {[['name', 'Name'], ['handle', '@handle — mention tag']].map(([k, label]) => (
                   <div key={k}>
                     <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">{label}</label>
                     <input
-                      type="text" value={charForm[k]} onChange={(e) => setCharForm({ ...charForm, [k]: e.target.value })}
+                      type="text" value={charForm[k] || ''} onChange={(e) => {
+                        const v = e.target.value;
+                        if (k === 'name' && !charForm.handle) setCharForm({ ...charForm, name: v, handle: deriveHandle(v) });
+                        else setCharForm({ ...charForm, [k]: v });
+                      }}
+                      placeholder={k === 'handle' ? '@actorAva' : ''}
                       className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
                     />
                   </div>
                 ))}
+                <details className="bg-slate-950/60 border border-slate-800 rounded-xl" open>
+                  <summary className="cursor-pointer px-3 py-2.5 text-[11px] font-bold uppercase tracking-wider text-cyan-300 list-none flex items-center justify-between">
+                    <span>Details — skin, build, face, hair, wardrobe…</span>
+                    <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
+                  </summary>
+                  <div className="px-3 pb-3 space-y-3">
+                    {CHAR_DETAIL_FIELDS.map(([k, label]) => (
+                      <div key={k}>
+                        <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">{label}</label>
+                        <input
+                          type="text" value={charForm[k] || ''} onChange={(e) => setCharForm({ ...charForm, [k]: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                        />
+                      </div>
+                    ))}
+                    <div>
+                      <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Notes</label>
+                      <textarea
+                        rows={2} value={charForm.notes || ''} onChange={(e) => setCharForm({ ...charForm, notes: e.target.value })}
+                        placeholder="Theme, backstory, anything else…"
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </details>
                 <div>
                   <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Portrait <span className="text-slate-600 normal-case">(optional — upload your own)</span></label>
                   <div className="flex gap-2 items-center">
@@ -2804,29 +3188,123 @@ export default function DDCDirectorStudio() {
             )}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {characterPresets.map(p => (
-                <div key={p.id} className="p-3.5 bg-slate-900/80 border border-slate-800 rounded-xl flex gap-3">
-                  {p.imageUrl ? (
-                    <img src={p.imageUrl} alt={p.name} className="w-20 h-24 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
-                  ) : (
-                    <div className="w-20 h-24 rounded-lg bg-slate-800 border border-slate-700 flex-shrink-0" />
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <h4 className="text-xs font-bold text-white truncate">{p.name}</h4>
-                    <p className="text-[11px] text-slate-400 line-clamp-2 mt-1">{p.face}{p.hair ? ` · ${p.hair}` : ''}</p>
-                    <p className="text-[10px] text-slate-500 truncate mt-0.5">{p.outfit}</p>
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      <button onClick={() => usePreset(p)} className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1 rounded transition">Use</button>
-                      <button onClick={() => setCharForm({ ...p })} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded transition">Edit</button>
-                      <button onClick={() => deletePreset(p.id)} className="text-[10px] bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-300 px-2 py-1 rounded transition">Delete</button>
+                <div key={p.id} className="p-3.5 bg-slate-900/80 border border-slate-800 rounded-xl">
+                  <div className="flex gap-3">
+                    {p.imageUrl ? (
+                      <img src={p.imageUrl} alt={p.name} className="w-20 h-24 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
+                    ) : (
+                      <div className="w-20 h-24 rounded-lg bg-slate-800 border border-slate-700 flex-shrink-0" />
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <h4 className="text-xs font-bold text-white truncate">{p.name}</h4>
+                        <span className="text-[9px] font-mono font-bold bg-cyan-950 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-800">@{p.handle}</span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 line-clamp-2 mt-1">{charBlurb(p)}</p>
+                      <p className="text-[10px] text-slate-500 truncate mt-0.5">{p.wardrobe || p.mood}</p>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        <button onClick={() => usePreset(p)} className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1 rounded transition">Use</button>
+                        <button
+                          onClick={() => copyText('handle-' + p.id, '@' + p.handle)}
+                          className="text-[10px] font-bold bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-300 px-2.5 py-1 rounded transition flex items-center space-x-1"
+                        >
+                          {copyFeedback === ('handle-' + p.id) ? <Check className="w-3 h-3" /> : <AtSign className="w-3 h-3" />}
+                          <span>{copyFeedback === ('handle-' + p.id) ? 'Copied!' : 'Insert @' + p.handle}</span>
+                        </button>
+                        <button
+                          onClick={() => setPortraitOpenId(portraitOpenId === p.id ? null : p.id)}
+                          className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 px-2.5 py-1 rounded transition"
+                        >
+                          Portrait prompt
+                        </button>
+                        <button onClick={() => setCharForm({ ...p })} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded transition">Edit</button>
+                        <button onClick={() => deletePreset(p.id)} className="text-[10px] bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-300 px-2 py-1 rounded transition">Delete</button>
+                      </div>
                     </div>
                   </div>
+                  {portraitOpenId === p.id && (
+                    <PortraitPromptBox
+                      char={p}
+                      defaultText={compilePortraitPrompt(p)}
+                      copyText={copyText}
+                      copyFeedback={copyFeedback}
+                      onClose={() => setPortraitOpenId(null)}
+                    />
+                  )}
                 </div>
               ))}
             </div>
+
+            {/* ============ BUILT-IN CHARACTER ROSTER ============ */}
+            <div className="mt-6 p-4 bg-slate-900/60 border border-slate-800 rounded-2xl">
+              <button
+                onClick={() => setRosterOpen(!rosterOpen)}
+                className="w-full flex items-center justify-between text-left"
+              >
+                <div>
+                  <h3 className="text-sm font-bold text-white">Built-in character roster <span className="text-[10px] font-bold bg-cyan-950 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-800 ml-1">{BUILTIN_CHARACTER_PRESETS.length}</span></h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">Tap "Add" to copy one into your library — then it shows up in your @mention bar and portrait prompts.</p>
+                </div>
+                <ChevronRight className={`w-4 h-4 text-slate-400 transition-transform ${rosterOpen ? 'rotate-90' : ''}`} />
+              </button>
+              {rosterOpen && (
+                <div className="mt-3">
+                  <div className="flex flex-wrap gap-1.5 mb-3">
+                    {BUILTIN_CATEGORIES.map(c => (
+                      <button
+                        key={c.id}
+                        onClick={() => setRosterCat(c.id)}
+                        className={`text-[10px] font-bold px-2.5 py-1 rounded-full border transition ${rosterCat === c.id ? 'bg-cyan-600 border-cyan-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-300'}`}
+                      >
+                        {c.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-96 overflow-y-auto pr-1">
+                    {rosterShown.map(b => {
+                      const added = builtinInLibrary(b);
+                      return (
+                        <div key={b.id} className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <h4 className="text-xs font-bold text-white truncate">{b.name}</h4>
+                            <span className="text-[9px] font-mono font-bold bg-cyan-950 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-800">@{b.handle}</span>
+                            {added && <span className="text-[9px] font-bold bg-emerald-950 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-800">IN LIBRARY</span>}
+                          </div>
+                          <p className="text-[11px] text-slate-400 line-clamp-2 mt-1">{charBlurb(b)}</p>
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {!added && (
+                              <button
+                                onClick={() => addBuiltinPreset(b)}
+                                className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1 rounded transition flex items-center space-x-1"
+                              >
+                                <Plus className="w-3 h-3" /><span>Add to library</span>
+                              </button>
+                            )}
+                            <button
+                              onClick={() => setPortraitOpenId(portraitOpenId === b.id ? null : b.id)}
+                              className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 px-2.5 py-1 rounded transition"
+                            >
+                              Portrait prompt
+                            </button>
+                          </div>
+                          {portraitOpenId === b.id && (
+                            <PortraitPromptBox
+                              char={{ ...b, handle: b.handle }}
+                              defaultText={compilePortraitPrompt({ ...b, handle: b.handle })}
+                              copyText={copyText}
+                              copyFeedback={copyFeedback}
+                              onClose={() => setPortraitOpenId(null)}
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
-
-        {/* ================= AUDIO TAB (song library) ================= */}
         {activeTab === 'audio' && (
           <div className="space-y-4 animate-fadeIn">
             <div className="flex items-center justify-between">
@@ -2927,14 +3405,20 @@ export default function DDCDirectorStudio() {
             <h2 className="text-base font-bold text-white">Visual Continuity Engine</h2>
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider">1. This project's cast</h3>
+                <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider">1. Cast <span className="text-slate-600 normal-case">(this project)</span></h3>
                 <button onClick={() => setShowCastPicker(!showCastPicker)} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 px-2.5 py-1.5 rounded-lg flex items-center space-x-1 transition">
                   <Plus className="w-3 h-3" /><span>{showCastPicker ? 'Close' : 'Pull from library'}</span>
                 </button>
               </div>
               {showCastPicker && (
-                <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-                  {characterPresets.filter(p => !cast.some(c => c.presetId === p.id)).map(p => (
+                <div className="space-y-1.5">
+                  <input
+                    type="text" value={castSearch} onChange={(e) => setCastSearch(e.target.value)}
+                    placeholder="Search the library — name or @handle…"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
+                  />
+                  <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                  {castPickerList.map(p => (
                     <div key={p.id} className="flex items-center gap-2 bg-slate-950/60 border border-slate-800 rounded-xl p-2">
                       {p.imageUrl ? (
                         <img src={p.imageUrl} alt={p.name} className="w-10 h-12 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
@@ -2943,14 +3427,15 @@ export default function DDCDirectorStudio() {
                       )}
                       <div className="flex-1 min-w-0">
                         <p className="text-xs font-bold text-white truncate">{p.name}</p>
-                        <p className="text-[10px] text-slate-500 truncate">{p.face}</p>
+                        <p className="text-[10px] text-slate-500 truncate">{charBlurb(p)}</p>
                       </div>
                       <button onClick={() => addPresetToCast(p)} className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1.5 rounded-lg transition flex-shrink-0">Add</button>
                     </div>
                   ))}
-                  {characterPresets.filter(p => !cast.some(c => c.presetId === p.id)).length === 0 && (
-                    <p className="text-[10px] text-slate-500">Everyone from your library is already in this cast. Make more on the Characters tab.</p>
+                  {castPickerList.length === 0 && (
+                    <p className="text-[10px] text-slate-500">{castSearch ? `No matches for "${castSearch}".` : 'Everyone from your library is already in this cast. Make more on the Characters tab.'}</p>
                   )}
+                  </div>
                 </div>
               )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -2968,7 +3453,7 @@ export default function DDCDirectorStudio() {
                           <span className="text-[9px] font-bold bg-cyan-950 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-800 flex-shrink-0">ACTIVE</span>
                         )}
                       </div>
-                      <p className="text-[11px] text-slate-300 line-clamp-2 mt-1">{char.face}</p>
+                      <p className="text-[11px] text-slate-300 line-clamp-2 mt-1">{charBlurb(char)}</p>
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         <label className="cursor-pointer text-[10px] bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-300 px-2 py-1 rounded flex items-center space-x-1 transition">
                           <Upload className="w-3 h-3" /><span>Portrait</span>
