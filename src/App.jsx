@@ -1781,7 +1781,12 @@ export default function DDCDirectorStudio() {
 
   /* ------------------------- prompt compilers ------------------------- */
   const compilePromptForScene = (scene) => {
-    return `Cinematic music video keyframe still, ${lockedStyle.descriptor}. Environment: ${scene.setting || lockedTheme.notes} \u2014 rich atmosphere, texture, and depth in frame. Camera: ${scene.cameraAngle}, ${scene.cameraMovement}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, high detail, 9:16 vertical.`;
+    const people = scenePeople(scene);
+    const castLine = people.length
+      ? ` Characters in frame (from your reference images): ${joinCharLabels(people.map(castCharLabel))} — keep every face, wardrobe, and identity exactly as the reference images.`
+      : '';
+    const lyricLine = (scene.lyrics || '').trim();
+    return `${sceneTag(scene)} — cinematic music video keyframe still, ${lockedStyle.descriptor}.${lyricLine ? ` Lyric of this shot: "${lyricLine}".` : ''}${castLine} Environment: ${scene.setting || lockedTheme.notes} — rich atmosphere, texture, and depth in frame. Camera: ${scene.cameraAngle}, ${scene.cameraMovement}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, high detail, 9:16 vertical.`;
   };
   const compileBrollPrompt = (scene) => {
     return `B-roll cutaway, cinematic music video, ${lockedStyle.descriptor}. No lip sync — pure atmosphere and texture. Setting: ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}. Camera: ${scene.cameraAngle}, slow ${scene.cameraMovement.toLowerCase()}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, 9:16 vertical.`;
