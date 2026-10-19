@@ -826,3 +826,9 @@ export const BUILTIN_CATEGORIES = [
   { id: 'androgynous', label: 'Androgynous' },
   { id: 'blank', label: 'Blanks' },
 ];
+
+// Every built-in preset ships with 4 empty reference-photo slots
+// (Front / Side / 3-4 / Back) — Lindsey uploads her Fooocus views into them.
+BUILTIN_CHARACTER_PRESETS.forEach(p => {
+  if (!Array.isArray(p.portraits)) p.portraits = ['Front', 'Side', '3/4', 'Back'].map(label => ({ label }));
+});

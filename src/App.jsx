@@ -4,7 +4,7 @@ import {
   ChevronRight, Clapperboard, Video, Scissors, Zap, X,
   MonitorPlay, FastForward, DownloadCloud, Cpu, CheckCircle, Upload,
   Mic, Clock, AlertTriangle, Loader2, Trash2, Plus, Wand2, FileAudio, BookOpen,
-  Layers, Users, AudioLines, Palette, AtSign,
+  Layers, Users, AudioLines, Palette, AtSign, Camera,
 } from 'lucide-react';
 import { BUILTIN_CHARACTER_PRESETS, BUILTIN_CATEGORIES } from './characterPresets.js';
 
@@ -195,6 +195,120 @@ async function idbImgDelete(id) {
   return new Promise((res, rej) => { const r = s.delete(id); r.onsuccess = () => res(); r.onerror = () => rej(r.error); });
 }
 
+/* ---- Character portrait blobs (same ddc-studio-images store as scene stills) ---- */
+async function storePortraitBlob(key, file) {
+  await idbImgPut({ id: key, blob: file, name: file.name || '', addedAt: Date.now() });
+  return URL.createObjectURL(file);
+}
+async function deletePortraitBlob(key) {
+  if (!key) return;
+  try { await idbImgDelete(key); } catch (e) {}
+}
+// Re-attach runtime blob: URLs to portrait slots from IndexedDB.
+// Also migrates legacy data: URLs into IndexedDB so localStorage stays lean.
+async function hydratePortraitSlots(slots, prefix) {
+  let dirty = false;
+  const out = [];
+  for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) {
+    const base = (slots && slots[i]) || {};
+    const label = base.label || DEFAULT_SLOT_LABELS[i];
+    const key = base.key || `${prefix}:${i}`;
+    let url = base.url || null;
+    if (url && url.startsWith('data:')) {
+      try {
+        const blob = await (await fetch(url)).blob();
+        await idbImgPut({ id: key, blob, name: '', addedAt: Date.now() });
+        url = URL.createObjectURL(blob);
+      } catch (e) { /* keep the data URL as-is */ }
+      dirty = true;
+      out.push({ label, key, url });
+    } else if (!url || url.startsWith('blob:')) {
+      let fresh = null;
+      try { const rec = await idbImgGet(key); if (rec && rec.blob) fresh = URL.createObjectURL(rec.blob); } catch (e) {}
+      if (fresh) {
+        if (fresh !== url) {
+          if (url && url.startsWith('blob:')) { try { URL.revokeObjectURL(url); } catch (e2) {} }
+          url = fresh; dirty = true;
+        }
+      } else if (url && url.startsWith('blob:')) { url = null; dirty = true; }
+      out.push({ label, key, url });
+    } else {
+      out.push({ label, key, url }); // remote https: URL — keep as-is
+    }
+  }
+  return { slots: out, dirty };
+}
+// Hydrate a list of characters' portrait slots (library or cast).
+async function hydrateCharsPortraits(chars, prefixFn) {
+  let dirty = false;
+  const out = [];
+  for (const c of (chars || [])) {
+    const prefix = prefixFn(c);
+    const norm = normalizePortraits(c, prefix);
+    const { slots, dirty: d } = await hydratePortraitSlots(norm, prefix);
+    if (d) dirty = true;
+    if (!Array.isArray(c.portraits)) dirty = true;
+    const nc = { ...c, portraits: slots };
+    delete nc.imageUrl;
+    out.push(nc);
+  }
+  return { chars: out, dirty };
+}
+// Copy portrait blobs to a new key namespace (library -> cast, cast -> library).
+async function clonePortraitSlots(slots, newPrefix) {
+  const out = [];
+  for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) {
+    const s = (slots && slots[i]) || {};
+    const label = s.label || DEFAULT_SLOT_LABELS[i];
+    const key = `${newPrefix}:${i}`;
+    let url = null;
+    if (s.key) {
+      try {
+        const rec = await idbImgGet(s.key);
+        if (rec && rec.blob) {
+          await idbImgPut({ id: key, blob: rec.blob, name: rec.name || '', addedAt: Date.now() });
+          url = URL.createObjectURL(rec.blob);
+        }
+      } catch (e) {}
+    }
+    if (!url && s.url) {
+      if (s.url.startsWith('data:')) {
+        try {
+          const blob = await (await fetch(s.url)).blob();
+          await idbImgPut({ id: key, blob, name: '', addedAt: Date.now() });
+          url = URL.createObjectURL(blob);
+        } catch (e) { url = s.url; }
+      } else if (!s.url.startsWith('blob:')) {
+        url = s.url; // remote https: — reference directly, no blob copy
+      }
+    }
+    const slot = { label, key };
+    if (url) slot.url = url;
+    out.push(slot);
+  }
+  return out;
+}
+// Shrink an uploaded portrait to a bounded JPEG blob so IndexedDB stays lean.
+function fileToSizedBlob(file, maxDim = 1024) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(img.width * scale));
+        c.height = Math.max(1, Math.round(img.height * scale));
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        c.toBlob((b) => b ? resolve(b) : reject(new Error('Could not process that image.')), 'image/jpeg', 0.85);
+      } catch (e) { URL.revokeObjectURL(url); reject(e); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read that image.')); };
+    img.src = url;
+  });
+}
+
 // Shrink an uploaded portrait to a small JPEG data URL so it fits in localStorage.
 function fileToPortraitDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -291,7 +405,7 @@ const DEFAULT_CHARACTERS = [
     marks: 'piercing hazel eyes', hair: 'Textured jet-black wavy fringe undercut', headwear: '',
     mood: 'intense, magnetic', artStyle: 'cinematic photorealism',
     wardrobe: 'Oversized distressed charcoal bomber jacket with neon orange lining', accessories: '', notes: '',
-    imageUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80'
+    portraits: [{ label: 'Front', url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80' }]
   }
 ];
 const DEFAULT_THEMES = [
@@ -387,6 +501,58 @@ function migrateCharShape(p) {
   return c;
 }
 
+/* ================== CHARACTER PORTRAIT REFERENCE SLOTS (4 views) ==================
+   Each character holds 4 ordered reference photos (Front / Side / 3-4 / Back by
+   default — labels are renamable, the A/B/C/D letter is fixed by slot index).
+   Slot shape: { label, key?, url? }.
+   - `key`  = IndexedDB blob key in the `ddc-studio-images` store (survives reloads).
+   - `url`  = runtime object URL, or a persistent data:/https: URL.
+   localStorage keeps {label,key} (+persistent url); blob: URLs are stripped on save. */
+const PORTRAIT_SLOT_COUNT = 4;
+const SLOT_LETTERS = ['A', 'B', 'C', 'D'];
+const DEFAULT_SLOT_LABELS = ['Front', 'Side', '3/4', 'Back'];
+const charPortraitKey = (charId, slot) => `char:${charId}:${slot}`;
+const castPortraitKey = (castId, slot) => `cast:${castId}:${slot}`;
+// Display tag for a slot: "1A" in cast (castNumber 1-based), "A" in the library.
+const slotTag = (slotIndex, castNumber) => `${castNumber ? castNumber : ''}${SLOT_LETTERS[slotIndex] || ''}`;
+
+// Ensure a 4-slot array; migrates the legacy single `imageUrl` into slot 0.
+function normalizePortraits(char, prefix) {
+  const pfx = prefix || `char:${char && char.id ? char.id : 'tmp'}`;
+  let slots = Array.isArray(char.portraits) ? char.portraits.slice(0, PORTRAIT_SLOT_COUNT) : [];
+  if (!slots.length && char.imageUrl) {
+    slots = [{ label: DEFAULT_SLOT_LABELS[0], url: char.imageUrl }];
+  }
+  const out = [];
+  for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) {
+    const s = slots[i] || {};
+    out.push({ label: s.label || DEFAULT_SLOT_LABELS[i], key: s.key || `${pfx}:${i}`, url: s.url || null });
+  }
+  return out;
+}
+// First slot with a displayable image — the representative thumbnail.
+function charThumbUrl(char) {
+  const slots = Array.isArray(char.portraits) ? char.portraits : [];
+  const s = slots.find(x => x && x.url);
+  return s ? s.url : '';
+}
+// Strip runtime blob: URLs before persisting (they die on reload; IDB re-attaches them).
+function saveablePortraits(slots) {
+  return (Array.isArray(slots) ? slots : []).slice(0, PORTRAIT_SLOT_COUNT).map(s => {
+    const o = { label: s.label || '' };
+    if (s.key) o.key = s.key;
+    if (s.url && !String(s.url).startsWith('blob:')) o.url = s.url;
+    return o;
+  });
+}
+function saveableChar(c) {
+  if (!c || typeof c !== 'object') return c;
+  const o = { ...c };
+  delete o.imageUrl;
+  o.portraits = saveablePortraits(c.portraits);
+  return o;
+}
+
 const SECTION_ORDER = ['Intro', 'Verse 1', 'Pre-Chorus', 'Chorus', 'Verse 2', 'Chorus', 'Bridge', 'Final Chorus'];
 /* Editable section labels — the auto-guess from defaultTitle is only the starting value;
    she can override every segment from the Sections step. */
@@ -456,9 +622,10 @@ function MentionBar({ presets, onPick, showAll, onToggleShowAll, showToggle }) {
         <button
           key={p.id}
           onClick={() => onPick(p.handle)}
-          className="text-[10px] font-bold bg-cyan-600/20 hover:bg-cyan-600/40 border border-cyan-500/40 text-cyan-300 px-2 py-1 rounded-lg transition"
+          className="text-[10px] font-bold bg-cyan-600/20 hover:bg-cyan-600/40 border border-cyan-500/40 text-cyan-300 px-2 py-1 rounded-lg transition flex items-center gap-1"
         >
-          @{p.handle}
+          {p._castNum ? <span className="text-[9px] font-black bg-cyan-600 text-white px-1 rounded">{p._castNum}</span> : null}
+          <span>@{p.handle}</span>
         </button>
       ))}
       {showToggle && (
@@ -473,9 +640,97 @@ function MentionBar({ presets, onPick, showAll, onToggleShowAll, showToggle }) {
     </div>
   );
 }
+/* Four reference-photo slots per character (Front / Side / 3-4 / Back).
+   Labels are renamable; the A/B/C/D letter is fixed by slot index.
+   In a cast, thumbnails are badged "1A" (castNumber 1-based); in the library, "A".
+   Blobs live in IndexedDB; downloads are named like "1A-odette-front.jpg". */
+function PortraitSlots({ slots, keyPrefix, castNumber, fileHandle, onChange }) {
+  const norm = [];
+  for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) {
+    const s = (slots && slots[i]) || {};
+    norm.push({ label: s.label || DEFAULT_SLOT_LABELS[i], key: s.key || `${keyPrefix}:${i}`, url: s.url || null });
+  }
+  const setSlot = (i, patch) => {
+    onChange(norm.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  };
+  const handleFile = async (i, file) => {
+    if (!file) return;
+    const key = `${keyPrefix}:${i}`;
+    const old = norm[i];
+    if (old.url && old.url.startsWith('blob:')) { try { URL.revokeObjectURL(old.url); } catch (e) {} }
+    try {
+      const blob = await fileToSizedBlob(file);
+      const url = await storePortraitBlob(key, blob);
+      setSlot(i, { key, url });
+    } catch (e) { /* unreadable file — leave the slot as-is */ }
+  };
+  const removeSlot = async (i) => {
+    const old = norm[i];
+    if (old.url && old.url.startsWith('blob:')) { try { URL.revokeObjectURL(old.url); } catch (e) {} }
+    await deletePortraitBlob(old.key);
+    setSlot(i, { key: `${keyPrefix}:${i}`, url: null });
+  };
+  const slug = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'view';
+  const downloadSlot = async (i) => {
+    const s = norm[i];
+    if (!s.url && !s.key) return;
+    const fname = `${slotTag(i, castNumber)}-${slug(fileHandle)}-${slug(s.label)}.jpg`;
+    try {
+      let href = null; let revoke = false;
+      if (s.key) {
+        try { const rec = await idbImgGet(s.key); if (rec && rec.blob) { href = URL.createObjectURL(rec.blob); revoke = true; } } catch (e) {}
+      }
+      if (!href && s.url) href = s.url;
+      if (!href) return;
+      const a = document.createElement('a');
+      a.href = href; a.download = fname;
+      document.body.appendChild(a); a.click(); a.remove();
+      if (revoke) setTimeout(() => URL.revokeObjectURL(href), 5000);
+    } catch (e) {}
+  };
+  return (
+    <div className="grid grid-cols-4 gap-2">
+      {norm.map((s, i) => (
+        <div key={i} className="relative bg-slate-950/70 border border-slate-800 rounded-lg p-1.5">
+          <div className="relative">
+            {s.url ? (
+              <img src={s.url} alt={slotTag(i, castNumber)} className="w-full aspect-[3/4] object-cover rounded-md border border-slate-700" />
+            ) : (
+              <div className="w-full aspect-[3/4] rounded-md bg-slate-800 border border-dashed border-slate-700 flex items-center justify-center">
+                <Camera className="w-4 h-4 text-slate-600" />
+              </div>
+            )}
+            <span className="absolute top-1 left-1 text-[10px] font-black bg-cyan-600 text-white px-1.5 py-0.5 rounded-md shadow">{slotTag(i, castNumber)}</span>
+          </div>
+          <input
+            value={s.label}
+            onChange={(e) => setSlot(i, { label: e.target.value })}
+            placeholder={DEFAULT_SLOT_LABELS[i]}
+            aria-label={`View ${SLOT_LETTERS[i]} label`}
+            className="w-full mt-1 bg-transparent text-[9px] font-bold text-slate-300 text-center focus:outline-none focus:text-white border-b border-transparent focus:border-cyan-600"
+          />
+          <div className="flex items-center justify-center gap-1 mt-1">
+            <label className="cursor-pointer text-[9px] font-bold bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-300 px-1.5 py-0.5 rounded transition">
+              {s.url ? 'Replace' : 'Upload'}
+              <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ''; handleFile(i, f); }} />
+            </label>
+            {s.url && (
+              <button onClick={() => downloadSlot(i)} title={`Download as ${slotTag(i, castNumber)}-${slug(fileHandle)}-${slug(s.label)}.jpg`} className="text-[9px] font-bold bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 px-1.5 py-0.5 rounded transition">
+                <Download className="w-3 h-3" />
+              </button>
+            )}
+            {s.url && (
+              <button onClick={() => removeSlot(i)} title="Remove photo" className="text-[9px] font-bold bg-slate-800 hover:bg-red-900/50 border border-slate-700 text-slate-400 hover:text-red-300 px-1.5 py-0.5 rounded transition">×</button>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* Inline autocomplete row shown while typing @name in a prompt field. */
-function AtSuggestRow({ query, presets, onPick }) {
-  const matches = (presets || []).filter(p => (p.handle || '').toLowerCase().startsWith((query || '').toLowerCase())).slice(0, 6);
+function AtSuggestRow({ query, presets, onPick }) {  const matches = (presets || []).filter(p => (p.handle || '').toLowerCase().startsWith((query || '').toLowerCase())).slice(0, 6);
   if (!matches.length) return null;
   return (
     <div className="flex flex-wrap gap-1.5 items-center bg-slate-950 border border-cyan-800 rounded-lg p-2">
@@ -554,6 +809,16 @@ function saveProjectRecord(rec) {
 function seedCast() {
   return DEFAULT_CHARACTERS.map(c => ({ ...c }));
 }
+// Normalize a project's cast: 4 portrait slots per member, legacy imageUrl folded in.
+function prepareCast(rawCast) {
+  const arr = Array.isArray(rawCast) && rawCast.length ? rawCast : seedCast();
+  return arr.map(c => {
+    const o = { ...c };
+    o.portraits = normalizePortraits(o, `cast:${o.id}`);
+    delete o.imageUrl;
+    return o;
+  });
+}
 function defaultLook() {
   return { characterId: 'char-1', paletteId: 'pal-1', styleId: 'sty-1', themeId: 'thm-1' };
 }
@@ -605,7 +870,13 @@ function loadCharacterPresets() {
     const arr = raw ? JSON.parse(raw) : null;
     if (Array.isArray(arr) && arr.length) {
       // migrate any pre-structured (old blob) saves: description -> notes
-      let next = arr.map(migrateCharShape);
+      // and fold the legacy single imageUrl into portrait slot 0
+      let next = arr.map(migrateCharShape).map(c => {
+        const o = { ...c };
+        o.portraits = normalizePortraits(o, `char:${o.id}`);
+        delete o.imageUrl;
+        return o;
+      });
       next = withHandles(next);
       const changed = next.some((p, i) =>
         p.handle !== arr[i].handle || p.notes !== arr[i].notes || p.face !== arr[i].face);
@@ -639,7 +910,7 @@ export default function DDCDirectorStudio() {
   const [project, setProject] = useState(boot.active.project);
   const [lyricsText, setLyricsText] = useState(boot.active.lyricsText || '');
   // Per-project cast + locked look — each video gets its own people and aesthetic.
-  const [cast, setCast] = useState(Array.isArray(boot.active.cast) && boot.active.cast.length ? boot.active.cast : seedCast());
+  const [cast, setCast] = useState(() => prepareCast(boot.active.cast));
   const [look, setLook] = useState(boot.active.look || defaultLook());
   const [audioMeta, setAudioMeta] = useState({
     songId: boot.active.audioSongId || null,
@@ -658,6 +929,11 @@ export default function DDCDirectorStudio() {
 
   // Global shared libraries (feed every project)
   const [characterPresets, setCharacterPresets] = useState(loadCharacterPresets);
+  // Persist the library: runtime blob: URLs are stripped (IndexedDB re-attaches them).
+  const persistCharacterPresets = (next) => {
+    setCharacterPresets(next);
+    try { localStorage.setItem(LS_CHARACTERS, JSON.stringify(next.map(saveableChar))); } catch (e) {}
+  };
   const [looks, setLooks] = useState(loadLooks);
   const [songLibrary, setSongLibrary] = useState([]);
   const [idbReady, setIdbReady] = useState(false);
@@ -713,7 +989,7 @@ export default function DDCDirectorStudio() {
   const [mentionShowAll, setMentionShowAll] = useState(false); // @mention bar: cast-first vs full library
   const [lookName, setLookName] = useState('');
 
-  const charFallback = { id: 'char-fallback', name: 'Lead', face: 'lead performer', hair: '', outfit: 'stage outfit', imageUrl: '' };
+  const charFallback = { id: 'char-fallback', name: 'Lead', face: 'lead performer', hair: '', outfit: 'stage outfit', portraits: [] };
   const lockedChar = cast.find(c => c.id === look.characterId) || cast[0] || charFallback;
   const lockedPalette = palettes.find(p => p.id === look.paletteId) || palettes[0];
   const lockedStyle = styles.find(s => s.id === look.styleId) || styles[0];
@@ -751,7 +1027,7 @@ export default function DDCDirectorStudio() {
         },
         lyricsText: lyrics, scenes,
         audioSongId: am.songId, audioName: am.name, audioDuration: am.duration,
-        cast: cst, look: lk,
+        cast: cst.map(saveableChar), look: lk,
       });
       setProjectIndex(prev => {
         const next = prev.map(e => e.id === id
@@ -783,7 +1059,7 @@ export default function DDCDirectorStudio() {
     setProject(rec.project);
     setLyricsText(rec.lyricsText || '');
     setSegments(Array.isArray(rec.scenes) ? rec.scenes : []);
-    setCast(Array.isArray(rec.cast) && rec.cast.length ? rec.cast : seedCast());
+    setCast(prepareCast(rec.cast));
     setLook(rec.look || defaultLook());
     const am = { songId: rec.audioSongId || null, name: rec.audioName || '', duration: rec.audioDuration || 0 };
     setAudioMeta(am);
@@ -813,6 +1089,11 @@ export default function DDCDirectorStudio() {
       const hydrated = await hydrateSceneImages(rec.id, Array.isArray(rec.scenes) ? rec.scenes : []);
       if (hydrated !== rec.scenes) setSegments(hydrated);
     } catch (e) { /* non-fatal */ }
+    // Re-attach the new cast's portrait blobs.
+    try {
+      const hc = await hydrateCharsPortraits(prepareCast(rec.cast), (c) => `cast:${c.id}`);
+      if (hc.dirty) setCast(hc.chars);
+    } catch (e) { /* non-fatal */ }
   };
 
   const createProject = (name) => {
@@ -833,7 +1114,7 @@ export default function DDCDirectorStudio() {
     setProject(rec.project);
     setLyricsText('');
     setSegments([]);
-    setCast(seedCast());
+    setCast(prepareCast(null));
     setLook(defaultLook());
     setAudioMeta({ songId: null, name: '', duration: 0 });
     setSelectedSceneIndex(0);
@@ -966,34 +1247,60 @@ export default function DDCDirectorStudio() {
           if (!cancelled && hydrated !== bootScenes) setSegments(hydrated);
         } catch (e) { /* non-fatal */ }
       }
+      // Re-attach character portrait blobs (library + this project's cast).
+      if (!cancelled) {
+        try {
+          const lib = await hydrateCharsPortraits(characterPresets, (c) => `char:${c.id}`);
+          if (!cancelled && lib.dirty) {
+            setCharacterPresets(lib.chars);
+            try { localStorage.setItem(LS_CHARACTERS, JSON.stringify(lib.chars.map(saveableChar))); } catch (e) {}
+          }
+        } catch (e) { /* non-fatal */ }
+        try {
+          const hc = await hydrateCharsPortraits(cast, (c) => `cast:${c.id}`);
+          if (!cancelled && hc.dirty) {
+            setCast(hc.chars);
+            writeActiveProject(project, lyricsText, segments, hc.chars, null, null);
+          }
+        } catch (e) { /* non-fatal */ }
+      }
     }).catch(() => { if (!cancelled) setIdbReady(false); });
     return () => { cancelled = true; };
   }, []);
 
   /* ------------------------- project cast (per-project characters) ------------------------- */
-  const addPresetToCast = (preset) => {
+  // Clone a library preset into the cast with its own portrait blob namespace.
+  const clonePresetForCast = async (preset) => {
+    const castId = 'c' + Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36);
+    const portraits = await clonePortraitSlots(preset.portraits, `cast:${castId}`);
+    const copy = { ...preset, id: castId, presetId: preset.id, portraits };
+    delete copy.imageUrl;
+    return copy;
+  };
+  const addPresetToCast = async (preset) => {
     if (cast.some(c => c.presetId === preset.id)) return;
-    const copy = { ...preset, id: 'c' + Date.now().toString(36), presetId: preset.id };
+    const copy = await clonePresetForCast(preset);
     writeCast([...cast, copy]);
   };
   const removeFromCast = (charId) => {
     if (cast.length <= 1) return;
     if (!window.confirm('Remove this character from this project?')) return;
+    for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) deletePortraitBlob(castPortraitKey(charId, i));
     const next = cast.filter(c => c.id !== charId);
     const l = look.characterId === charId ? { ...look, characterId: next[0].id } : look;
     setCast(next);
     setLook(l);
     writeActiveProject(project, lyricsText, segments, next, l, null);
   };
-  const saveCastToLibrary = (char) => {
+  const saveCastToLibrary = async (char) => {
     if (characterPresets.some(p => p.name === char.name && (p.notes || '') === (char.notes || ''))) return;
+    const newId = 'ch' + Date.now().toString(36);
+    const portraits = await clonePortraitSlots(char.portraits, `char:${newId}`);
     const preset = {
-      id: 'ch' + Date.now().toString(36), name: char.name,
-      ...pickCharFields(char), imageUrl: char.imageUrl || '',
+      id: newId, name: char.name,
+      ...pickCharFields(char), portraits,
     };
-    const next = [preset, ...characterPresets];
-    setCharacterPresets(next);
-    try { localStorage.setItem(LS_CHARACTERS, JSON.stringify(next)); } catch (e) {}
+    persistCharacterPresets([preset, ...characterPresets]);
   };
 
   /* ------------------------- character presets (global library) ------------------------- */
@@ -1011,39 +1318,39 @@ export default function DDCDirectorStudio() {
     if (charForm.id) {
       next = characterPresets.map(p => {
         if (p.id !== charForm.id) return p;
-        const merged = { ...p, ...charForm, name: charForm.name.trim(), handle };
+        const merged = { ...p, ...charForm, name: charForm.name.trim(), handle, portraits: charForm.portraits };
         delete merged.face; delete merged.outfit; delete merged.styleNotes; // legacy blob keys never return
+        delete merged.imageUrl;
         return merged;
       });
     } else {
       next = [{
-        id: 'ch' + Date.now().toString(36), name: charForm.name.trim(), handle,
-        ...pickCharFields(charForm), imageUrl: charForm.imageUrl || '',
+        id: charForm.id || 'ch' + Date.now().toString(36), name: charForm.name.trim(), handle,
+        ...pickCharFields(charForm), portraits: charForm.portraits,
       }, ...characterPresets];
     }
-    setCharacterPresets(next);
-    try { localStorage.setItem(LS_CHARACTERS, JSON.stringify(next)); } catch (e) {}
+    persistCharacterPresets(next);
     setCharForm(null);
   };
   const deletePreset = (id) => {
     if (!window.confirm('Delete this character preset?')) return;
-    const next = characterPresets.filter(p => p.id !== id);
-    setCharacterPresets(next);
-    try { localStorage.setItem(LS_CHARACTERS, JSON.stringify(next)); } catch (e) {}
+    for (let i = 0; i < PORTRAIT_SLOT_COUNT; i++) deletePortraitBlob(charPortraitKey(id, i));
+    persistCharacterPresets(characterPresets.filter(p => p.id !== id));
   };
   // Copies a built-in roster character into her library (fresh id + unique handle).
   const addBuiltinPreset = (preset) => {
     if (characterPresets.some(p => p.builtinId === preset.id)) return;
     const handle = uniqueHandle(preset.handle || deriveHandle(preset.name), null);
+    const newId = 'ch' + Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36);
     const entry = {
-      id: 'ch' + Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36),
+      id: newId,
       builtinId: preset.id,
       name: preset.name, handle,
-      ...pickCharFields(preset), imageUrl: '',
+      ...pickCharFields(preset),
+      portraits: normalizePortraits(preset, `char:${newId}`),
     };
     const next = [entry, ...characterPresets];
-    setCharacterPresets(next);
-    try { localStorage.setItem(LS_CHARACTERS, JSON.stringify(next)); } catch (e) {}
+    persistCharacterPresets(next);
   };
   const builtinInLibrary = (preset) => characterPresets.some(p => p.builtinId === preset.id);
   const rosterShown = rosterCat === 'all' ? BUILTIN_CHARACTER_PRESETS : BUILTIN_CHARACTER_PRESETS.filter(p => p.category === rosterCat);
@@ -1053,11 +1360,42 @@ export default function DDCDirectorStudio() {
   const mentionPool = mentionShowAll
     ? characterPresets
     : (castForMentions.length ? castForMentions : characterPresets);
+  const isCastPool = !mentionShowAll && castForMentions.length > 0;
   const mentionBarProps = {
-    presets: mentionPool,
+    presets: isCastPool ? mentionPool.map((c, i) => ({ ...c, _castNum: i + 1 })) : mentionPool,
     showAll: mentionShowAll,
     showToggle: true,
     onToggleShowAll: () => setMentionShowAll(v => !v),
+  };
+  // "Character 1 (@odette) [refs 1A, 1C]" — which cast members a scene's prompts
+  // mention, with their filled reference-photo slot letters, for the Bible export.
+  const sceneCharacterLine = (scene) => {
+    const text = [scene.approvedPrompt, scene.biblePrompt, scene.brollPrompt, scene.lipsyncPrompt, scene.videoPrompt]
+      .filter(Boolean).join(' ');
+    if (!text) return '';
+    const seen = new Set();
+    const found = [];
+    [...castForMentions, ...characterPresets].forEach((c) => {
+      const h = c.handle || deriveHandle(c.name);
+      if (!h || seen.has(h.toLowerCase())) return;
+      const re = new RegExp('@' + h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?!\\w)');
+      if (re.test(text)) { seen.add(h.toLowerCase()); found.push(c); }
+    });
+    found.sort((a, b) => {
+      const ai = cast.findIndex(c => c.id === a.id); const bi = cast.findIndex(c => c.id === b.id);
+      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    });
+    if (!found.length) return '';
+    const parts = found.map(c => {
+      const n = cast.findIndex(x => x.id === c.id) + 1;
+      const h = c.handle || deriveHandle(c.name);
+      if (n < 1) return `@${h}`;
+      const refs = (Array.isArray(c.portraits) ? c.portraits : [])
+        .map((sl, i) => (sl && sl.url ? `${n}${SLOT_LETTERS[i]}` : null))
+        .filter(Boolean);
+      return refs.length ? `Character ${n} (@${h}) [refs ${refs.join(', ')}]` : `Character ${n} (@${h})`;
+    });
+    return `Characters: ${parts.join(' · ')}`;
   };
   /* Searchable cast picker list: full library minus cast members, filtered by query. */
   const castPickerList = (() => {
@@ -1069,11 +1407,11 @@ export default function DDCDirectorStudio() {
     });
   })();
   // "Use" drops the preset into the open project's cast and makes it the star.
-  const usePreset = (preset) => {
+  const usePreset = async (preset) => {
     let c = cast.find(x => x.presetId === preset.id);
     let nextCast = cast;
     if (!c) {
-      c = { ...preset, id: 'c' + Date.now().toString(36), presetId: preset.id };
+      c = await clonePresetForCast(preset);
       nextCast = [...cast, c];
       setCast(nextCast);
     }
@@ -1618,22 +1956,30 @@ export default function DDCDirectorStudio() {
 
   /* ------------------------- Director: Bible copy-all ------------------------- */
   const copyAllBible = () => {
-    const text = segments.map(s => (
-      `SCENE ${s.sceneNumber} — ${fmtClock(s.startTime)}–${fmtClock(s.endTime)} (${s.title})${s.lipSyncEnabled ? ' [LIP SYNC]' : ''}\n` +
-      `Lyrics: ${s.lyrics}\n` +
-      `Image: ${s.imageName || (s.keyframeImageUrl ? 'uploaded still' : '(no image uploaded yet)')}\n` +
-      `Production prompt: ${expandMentions(s.biblePrompt || compileBiblePrompt(s))}`
-    )).join('\n\n---\n\n');
+    const text = segments.map(s => {
+      const charsLine = sceneCharacterLine(s);
+      return (
+        `SCENE ${s.sceneNumber} — ${fmtClock(s.startTime)}–${fmtClock(s.endTime)} (${s.title})${s.lipSyncEnabled ? ' [LIP SYNC]' : ''}\n` +
+        (charsLine ? charsLine + '\n' : '') +
+        `Lyrics: ${s.lyrics}\n` +
+        `Image: ${s.imageName || (s.keyframeImageUrl ? 'uploaded still' : '(no image uploaded yet)')}\n` +
+        `Production prompt: ${expandMentions(s.biblePrompt || compileBiblePrompt(s))}`
+      );
+    }).join('\n\n---\n\n');
     copyText('bible-all', text || 'No scenes yet.');
   };
 
   /* ------------------------- Director: copy ALL image prompts (paste into Fooocus) ------------------------- */
   const copyAllImagePrompts = () => {
-    const text = segments.map(s => (
-      `SCENE ${s.sceneNumber} — ${fmtClock(s.startTime)}–${fmtClock(s.endTime)} (${s.title})${s.lipSyncEnabled ? ' [LIP SYNC]' : ''}\n` +
-      `Lyrics: ${s.lyrics}\n` +
-      `Image prompt: ${expandMentions(s.approvedPrompt || compilePromptForScene(s))}`
-    )).join('\n\n---\n\n');
+    const text = segments.map(s => {
+      const charsLine = sceneCharacterLine(s);
+      return (
+        `SCENE ${s.sceneNumber} — ${fmtClock(s.startTime)}–${fmtClock(s.endTime)} (${s.title})${s.lipSyncEnabled ? ' [LIP SYNC]' : ''}\n` +
+        (charsLine ? charsLine + '\n' : '') +
+        `Lyrics: ${s.lyrics}\n` +
+        `Image prompt: ${expandMentions(s.approvedPrompt || compilePromptForScene(s))}`
+      );
+    }).join('\n\n---\n\n');
     copyText('imgprompts-all', text || 'No scenes yet.');
   };
 
@@ -2937,6 +3283,9 @@ export default function DDCDirectorStudio() {
                       )}
                     </div>
                     <p className="text-xs text-slate-300"><span className="text-slate-500 font-bold">Lyrics: </span><span className="italic">"{s.lyrics}"</span></p>
+                    {sceneCharacterLine(s) ? (
+                      <p className="text-[11px] text-cyan-300 font-bold">{sceneCharacterLine(s)}</p>
+                    ) : null}
                     <div className="max-w-[220px]">
                       {s.keyframeImageUrl ? (
                         <img src={s.keyframeImageUrl} alt={'Scene ' + s.sceneNumber + ' visual'} className="w-full aspect-[9/16] object-cover rounded-xl border border-slate-700" />
@@ -3108,7 +3457,7 @@ export default function DDCDirectorStudio() {
           <div className="space-y-4 animate-fadeIn">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-bold text-white">Character library</h2>
-              <button onClick={() => setCharForm({ name: '', handle: '', skinTone: '', build: '', faceShape: '', marks: '', hair: '', headwear: '', mood: '', artStyle: '', wardrobe: '', accessories: '', notes: '', imageUrl: '' })} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded-xl flex items-center space-x-1.5 transition">
+              <button onClick={() => { const nid = 'ch' + Date.now().toString(36); setCharForm({ id: nid, name: '', handle: '', skinTone: '', build: '', faceShape: '', marks: '', hair: '', headwear: '', mood: '', artStyle: '', wardrobe: '', accessories: '', notes: '', portraits: DEFAULT_SLOT_LABELS.map((label, i) => ({ label, key: charPortraitKey(nid, i), url: null })) }); }} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded-xl flex items-center space-x-1.5 transition">
                 <Plus className="w-3.5 h-3.5" /><span>New</span>
               </button>
             </div>
@@ -3156,29 +3505,13 @@ export default function DDCDirectorStudio() {
                   </div>
                 </details>
                 <div>
-                  <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Portrait <span className="text-slate-600 normal-case">(optional — upload your own)</span></label>
-                  <div className="flex gap-2 items-center">
-                    <input
-                      type="text" value={charForm.imageUrl} onChange={(e) => setCharForm({ ...charForm, imageUrl: e.target.value })}
-                      placeholder="https://… or upload →" className="flex-1 bg-slate-950 border border-slate-700 rounded-lg p-2 text-sm text-white focus:border-cyan-500 focus:outline-none"
-                    />
-                    <label className="cursor-pointer text-[10px] font-bold bg-indigo-600/40 hover:bg-indigo-600/60 border border-indigo-500/40 text-indigo-200 px-2.5 py-2 rounded-lg transition flex-shrink-0 flex items-center space-x-1">
-                      <Upload className="w-3 h-3" /><span>Upload</span>
-                      <input
-                        type="file" accept="image/*" className="hidden"
-                        onChange={async (e) => {
-                          const f = e.target.files && e.target.files[0];
-                          e.target.value = '';
-                          if (!f) return;
-                          try {
-                            const url = await fileToPortraitDataUrl(f);
-                            setCharForm((prev) => prev ? { ...prev, imageUrl: url } : prev);
-                          } catch (err) { /* non-fatal */ }
-                        }}
-                      />
-                    </label>
-                  </div>
-                  {charForm.imageUrl ? <img src={charForm.imageUrl} alt="" className="w-20 h-24 object-cover rounded-lg border border-slate-700 mt-2" /> : null}
+                  <label className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Reference photos <span className="text-slate-600 normal-case">(4 views — tap a label to rename it)</span></label>
+                  <PortraitSlots
+                    slots={charForm.portraits}
+                    keyPrefix={`char:${charForm.id}`}
+                    fileHandle={charForm.handle || charForm.name || 'character'}
+                    onChange={(slots) => setCharForm((prev) => prev ? { ...prev, portraits: slots } : prev)}
+                  />
                 </div>
                 <div className="flex gap-2">
                   <button onClick={savePresetForm} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-2 rounded-lg transition">Save</button>
@@ -3190,8 +3523,8 @@ export default function DDCDirectorStudio() {
               {characterPresets.map(p => (
                 <div key={p.id} className="p-3.5 bg-slate-900/80 border border-slate-800 rounded-xl">
                   <div className="flex gap-3">
-                    {p.imageUrl ? (
-                      <img src={p.imageUrl} alt={p.name} className="w-20 h-24 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
+                    {charThumbUrl(p) ? (
+                      <img src={charThumbUrl(p)} alt={p.name} className="w-20 h-24 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
                     ) : (
                       <div className="w-20 h-24 rounded-lg bg-slate-800 border border-slate-700 flex-shrink-0" />
                     )}
@@ -3217,10 +3550,19 @@ export default function DDCDirectorStudio() {
                         >
                           Portrait prompt
                         </button>
-                        <button onClick={() => setCharForm({ ...p })} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded transition">Edit</button>
+                        <button onClick={() => setCharForm({ ...p, portraits: normalizePortraits(p, `char:${p.id}`) })} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded transition">Edit</button>
                         <button onClick={() => deletePreset(p.id)} className="text-[10px] bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-300 px-2 py-1 rounded transition">Delete</button>
                       </div>
                     </div>
+                  </div>
+                  <div className="mt-3">
+                    <p className="text-[9px] uppercase font-bold text-slate-500 mb-1.5">Reference photos <span className="text-slate-600 normal-case">(A–D)</span></p>
+                    <PortraitSlots
+                      slots={p.portraits}
+                      keyPrefix={`char:${p.id}`}
+                      fileHandle={p.handle || p.name}
+                      onChange={(slots) => persistCharacterPresets(characterPresets.map(x => x.id === p.id ? { ...x, portraits: slots } : x))}
+                    />
                   </div>
                   {portraitOpenId === p.id && (
                     <PortraitPromptBox
@@ -3420,8 +3762,8 @@ export default function DDCDirectorStudio() {
                   <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
                   {castPickerList.map(p => (
                     <div key={p.id} className="flex items-center gap-2 bg-slate-950/60 border border-slate-800 rounded-xl p-2">
-                      {p.imageUrl ? (
-                        <img src={p.imageUrl} alt={p.name} className="w-10 h-12 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
+                      {charThumbUrl(p) ? (
+                        <img src={charThumbUrl(p)} alt={p.name} className="w-10 h-12 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
                       ) : (
                         <div className="w-10 h-12 rounded-lg bg-slate-800 border border-slate-700 flex-shrink-0" />
                       )}
@@ -3439,48 +3781,48 @@ export default function DDCDirectorStudio() {
                 </div>
               )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {cast.map(char => (
-                  <div key={char.id} className="p-3.5 bg-slate-900/80 border border-slate-800 rounded-xl flex gap-3 shadow-lg">
-                    {char.imageUrl ? (
-                      <img src={char.imageUrl} alt={char.name} className="w-20 h-24 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
-                    ) : (
-                      <div className="w-20 h-24 rounded-lg bg-slate-800 border border-slate-700 flex-shrink-0" />
-                    )}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between gap-2">
-                        <h4 className="text-xs font-bold text-white truncate">{char.name}</h4>
-                        {look.characterId === char.id && (
-                          <span className="text-[9px] font-bold bg-cyan-950 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-800 flex-shrink-0">ACTIVE</span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-slate-300 line-clamp-2 mt-1">{charBlurb(char)}</p>
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        <label className="cursor-pointer text-[10px] bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-300 px-2 py-1 rounded flex items-center space-x-1 transition">
-                          <Upload className="w-3 h-3" /><span>Portrait</span>
-                          <input
-                            type="file" accept="image/*" className="hidden"
-                            onChange={async (e) => {
-                              const f = e.target.files && e.target.files[0];
-                              e.target.value = '';
-                              if (!f) return;
-                              try {
-                                const url = await fileToPortraitDataUrl(f);
-                                const next = cast.map(c => c.id === char.id ? { ...c, imageUrl: url } : c);
-                                setCast(next);
-                                writeActiveProject(project, lyricsText, segments, next, null, null);
-                              } catch (err) { /* non-fatal */ }
-                            }}
-                          />
-                        </label>
-                        <button onClick={() => saveCastToLibrary(char)} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded flex items-center space-x-1 transition">
-                          <Download className="w-3 h-3" /><span>Save to library</span>
-                        </button>
-                        {cast.length > 1 && (
-                          <button onClick={() => removeFromCast(char.id)} className="text-[10px] bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-300 px-2 py-1 rounded flex items-center space-x-1 transition">
-                            <Trash2 className="w-3 h-3" /><span>Remove</span>
+                {cast.map((char, ci) => (
+                  <div key={char.id} className="p-3.5 bg-slate-900/80 border border-slate-800 rounded-xl shadow-lg">
+                    <div className="flex gap-3">
+                      {charThumbUrl(char) ? (
+                        <img src={charThumbUrl(char)} alt={char.name} className="w-20 h-24 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
+                      ) : (
+                        <div className="w-20 h-24 rounded-lg bg-slate-800 border border-slate-700 flex-shrink-0" />
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-[9px] font-black bg-cyan-600 text-white px-1.5 py-0.5 rounded">Character {ci + 1}</span>
+                          <h4 className="text-xs font-bold text-white truncate">{char.name}</h4>
+                          {look.characterId === char.id && (
+                            <span className="text-[9px] font-bold bg-cyan-950 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-800 flex-shrink-0">ACTIVE</span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-slate-300 line-clamp-2 mt-1">{charBlurb(char)}</p>
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          <button onClick={() => saveCastToLibrary(char)} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded flex items-center space-x-1 transition">
+                            <Download className="w-3 h-3" /><span>Save to library</span>
                           </button>
-                        )}
+                          {cast.length > 1 && (
+                            <button onClick={() => removeFromCast(char.id)} className="text-[10px] bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-300 px-2 py-1 rounded flex items-center space-x-1 transition">
+                              <Trash2 className="w-3 h-3" /><span>Remove</span>
+                            </button>
+                          )}
+                        </div>
                       </div>
+                    </div>
+                    <div className="mt-3">
+                      <p className="text-[9px] uppercase font-bold text-slate-500 mb-1.5">Reference photos <span className="text-cyan-400">{ci + 1}A–{ci + 1}D</span></p>
+                      <PortraitSlots
+                        slots={char.portraits}
+                        keyPrefix={`cast:${char.id}`}
+                        castNumber={ci + 1}
+                        fileHandle={char.handle || char.name}
+                        onChange={(slots) => {
+                          const next = cast.map(c => c.id === char.id ? { ...c, portraits: slots } : c);
+                          setCast(next);
+                          writeActiveProject(project, lyricsText, segments, next, null, null);
+                        }}
+                      />
                     </div>
                   </div>
                 ))}
