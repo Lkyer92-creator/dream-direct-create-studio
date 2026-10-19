@@ -1791,20 +1791,36 @@ export default function DDCDirectorStudio() {
   const compileBrollPrompt = (scene) => {
     return `B-roll cutaway, cinematic music video, ${lockedStyle.descriptor}. No lip sync — pure atmosphere and texture. Setting: ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}. Camera: ${scene.cameraAngle}, slow ${scene.cameraMovement.toLowerCase()}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, 9:16 vertical.`;
   };
+  /* Generator-clean character label + per-role motion beats for image-to-video prompts.
+     Video models can't use @handles or emojis — they get "Character 1 (Lead)". */
+  const genCharLabel = (c) => {
+    const n = cast.findIndex(x => x.id === c.id) + 1;
+    const rd = c.role ? roleDef(c.role) : null;
+    return `Character ${n < 1 ? '?' : n}${rd ? ` (${rd.label})` : ''}`;
+  };
+  const ROLE_BEATS = {
+    colead: 'moves in sync with the lead, close beside them',
+    confidant: 'stays near the lead, reacting with quiet intensity',
+    mentor: 'observes with calm authority, gesturing guidance',
+    light: 'moves playfully at the edge of frame, bringing levity',
+    muse: 'drifts almost still, ethereal, drawing the eye',
+    tragic: 'withdraws slowly, shoulders falling, lost in the moment',
+    antagonist: 'advances with menacing intent, eyes locked on the lead',
+  };
   const compileLipSyncPrompt = (scene) => {
     const people = scenePeople(scene);
     const singer = people.find(c => c.id === lockedChar.id) || people[0];
-    const perfLine = people.length === 1
-      ? `${castCharLabel(singer)} from the reference image sings directly into the lens, emotive, mouth forming the lyric "{{LYRIC}}". Keep face, wardrobe, and identity exactly as the reference image.`
-      : `Lip sync shot \u2014 the characters from the reference images: ${joinCharLabels(people.map(castCharLabel))}. ${castCharLabel(singer)} sings directly into the lens, emotive, mouth forming the lyric "{{LYRIC}}"; the others are present in frame, true to their roles. Keep every face, wardrobe, and identity exactly as the reference images.`;
-    return `Extreme close-up lip sync shot, cinematic music video. ${perfLine} Camera: intimate close-up, subtle slow dolly in. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, shallow depth of field, 9:16 vertical.`;
+    const others = people.filter(c => c !== singer)
+      .map(c => `${genCharLabel(c)} ${ROLE_BEATS[c.role] || 'is present in frame'}`).join('; ');
+    return `Image-to-video lip sync shot, 9:16 vertical. Extreme close-up: ${genCharLabel(singer)} sings directly into the lens, mouth and lip movements visibly matching the lyric "{{LYRIC}}", emotive and locked on camera.${others ? ` ${others}.` : ''} Preserve the exact face, wardrobe, and identity from the input image — no face change, no outfit change. Camera: intimate close-up, subtle slow dolly in. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, shallow depth of field.`;
   };
   const compileVideoPrompt = (scene) => {
     const people = scenePeople(scene);
-    const charLine = people.length === 1
-      ? `${castCharLabel(people[0])} from the reference image performs the action \u2014 keep face, wardrobe, and identity exactly as the reference image.`
-      : `The characters from the reference images: ${joinCharLabels(people.map(castCharLabel))}. ${castCharLabel(people[0])} performs the action while the others appear in frame, true to their roles \u2014 keep every face, wardrobe, and identity exactly as the reference images.`;
-    return `${scene.characterAction}, ${scene.cameraMovement.toLowerCase()} camera move, ${scene.cameraAngle.toLowerCase()}. Setting: ${scene.setting || lockedTheme.notes}. Lighting: ${scene.lightingMood}. ${charLine} Lyric for this shot: "{{LYRIC}}". Colors: [${lockedPalette.hexes.join(', ')}]. Cinematic photorealistic motion, smooth natural movement, 9:16 vertical video.`;
+    const beats = people.map((c, i) => {
+      const action = (i === 0 ? (scene.characterAction || 'performs at center frame') : (ROLE_BEATS[c.role] || 'is present in frame, true to the scene'));
+      return `${genCharLabel(c)}: ${action}`;
+    }).join(' ');
+    return `Image-to-video prompt, 9:16 vertical. Preserve the exact faces, wardrobe, and identities from the input image — do not change faces or outfits. ${beats} Camera: ${scene.cameraMovement}, ${scene.cameraAngle}. Setting: ${scene.setting || lockedTheme.notes}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Mood of the lyric "{{LYRIC}}". Photorealistic cinematic motion.`;
   };
   // Full DIY production prompt for the Bible: paste into Runway / Kling yourself.
   const compileBiblePrompt = (scene) => {
