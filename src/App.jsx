@@ -1208,6 +1208,34 @@ export default function DDCDirectorStudio() {
     updateSceneTimes(index, m.start.value, m.end.value);
   };
 
+  /* One-tap scene length presets — keep the scene's start anchored, set
+     end = start + length (clamped to the song duration). Marks customTimes
+     like a manual edit; "Reset to interval" still clears it. */
+  const QUICK_LENGTHS = [5, 10, 15, 17, 30, 33];
+
+  const setSceneLength = (index, lenSec) => {
+    const s = segments[index];
+    if (!s) return;
+    const dur = audio && audio.duration ? audio.duration : 0;
+    if (!dur) { flashTimeHint(s.id, 'Load a song first'); return; }
+    const ns = Math.min(Math.max(s.startTime || 0, 0), dur);
+    let ne = ns + lenSec;
+    const clamped = ne > dur;
+    ne = Math.min(ne, dur);
+    if (!(ne > ns)) { flashTimeHint(s.id, 'End must be after start'); return; }
+    const newDur = ne - ns;
+    updateScene(index, {
+      startTime: ns,
+      endTime: ne,
+      duration: newDur,
+      customTimes: true,
+      trimStart: Math.min(s.trimStart || 0, Math.max(0, newDur - 0.1)),
+      trimEnd: Math.min(s.trimEnd != null ? s.trimEnd : newDur, newDur),
+    });
+    if (clamped) flashTimeHint(s.id, `Clamped to song length (${fmtClock(dur)})`);
+    else flashTimeHint(s.id, `Scene length ${lenSec}s`);
+  };
+
   /* Shared start/end editor used in the Sections step and the Scenes tab. */
   const renderTimeEditor = (index, s) => {
     const rid = s.id;
@@ -1249,6 +1277,17 @@ export default function DDCDirectorStudio() {
             Reset to interval
           </button>
         )}
+        <span className="text-[10px] uppercase font-bold text-slate-500 ml-1">Length</span>
+        {QUICK_LENGTHS.map((L) => (
+          <button
+            key={L}
+            onClick={() => setSceneLength(index, L)}
+            title={`Set this scene to ${L} seconds (start stays put)`}
+            className="text-[10px] font-bold px-2 py-1 rounded-lg border border-slate-700 text-slate-300 hover:border-cyan-500 hover:text-cyan-300 transition"
+          >
+            {L}s
+          </button>
+        ))}
         {timeHints[rid] && (
           <span className="text-[10px] text-amber-300">{timeHints[rid]}</span>
         )}
