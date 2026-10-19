@@ -1099,7 +1099,7 @@ export default function DDCDirectorStudio() {
       const scenes = (segs || segments).map(s => ({
         id: s.id, sceneNumber: s.sceneNumber, title: s.title,
         startTime: s.startTime, endTime: s.endTime, duration: s.duration,
-        energyLevel: s.energyLevel, lyrics: s.lyrics,
+        energyLevel: s.energyLevel, lyrics: s.lyrics, lyricsLocked: s.lyricsLocked || false,
         shotType: s.shotType, lipSyncEnabled: s.lipSyncEnabled,
         characterAction: s.characterAction, cameraAngle: s.cameraAngle,
         cameraMovement: s.cameraMovement, setting: s.setting, lightingMood: s.lightingMood,
@@ -1742,24 +1742,59 @@ export default function DDCDirectorStudio() {
   };
 
   /* ------------------------- segment builder ------------------------- */
+  // "mm:ss" or "mm:ss.s" -> seconds
+  const tsToSec = (ts) => {
+    const m = String(ts).match(/(\d{1,3}):(\d{2})(?:\.(\d))?/);
+    if (!m) return null;
+    return parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + (m[3] ? parseInt(m[3], 10) / 10 : 0);
+  };
+
   const buildSegments = (duration, intervalSec, lyricLines, prev) => {
     const iv = Math.max(1, intervalSec || 15);
     const n = Math.max(1, Math.ceil(duration / iv));
-    const per = Math.max(1, Math.ceil(lyricLines.length / n));
-    const segs = [];
+    // 1) Scene time ranges first (custom times survive re-slices).
+    const ranges = [];
     for (let i = 0; i < n; i++) {
       const uStart = i * iv;
       const uEnd = Math.min((i + 1) * iv, duration);
-      const title = defaultTitle(i, n);
-      const lines = lyricLines.slice(i * per, (i + 1) * per).join(' ').replace(/\[\d{2}:\d{2}(?:\.\d)?\]/g, '').trim();
-      const p = prev && prev[i];
-      // Per-scene custom times survive re-slices; everything else follows the uniform grid.
+      const p0 = prev && prev[i];
       let start = uStart, end = uEnd, custom = false;
-      if (p && p.customTimes && typeof p.startTime === 'number' && typeof p.endTime === 'number') {
-        const cs = Math.min(Math.max(p.startTime, 0), duration);
-        const ce = Math.min(Math.max(p.endTime, 0), duration);
+      if (p0 && p0.customTimes && typeof p0.startTime === 'number' && typeof p0.endTime === 'number') {
+        const cs = Math.min(Math.max(p0.startTime, 0), duration);
+        const ce = Math.min(Math.max(p0.endTime, 0), duration);
         if (ce > cs) { start = cs; end = ce; custom = true; }
       }
+      ranges.push({ start, end, custom });
+    }
+    // 2) Parse lyric lines, keeping their [mm:ss] timestamps.
+    const parsed = lyricLines.map((l) => {
+      const m = l.match(/\[(\d{1,3}:\d{2}(?:\.\d)?)\]/);
+      return { text: l.replace(/\[\d{1,3}:\d{2}(?:\.\d)?\]/g, '').trim(), t: m ? tsToSec(m[1]) : null };
+    });
+    // 3) Timestamped lines go to the scene whose range contains the timestamp;
+    //    unstamped lines fall back to the old even split.
+    const buckets = ranges.map(() => []);
+    const unstamped = [];
+    parsed.forEach((pl) => {
+      if (pl.t == null || !pl.text) { if (pl.text) unstamped.push(pl); return; }
+      let idx = ranges.findIndex((r) => pl.t >= r.start && pl.t < r.end);
+      if (idx < 0) {
+        let best = 0;
+        for (let i = 0; i < n; i++) if (ranges[i].start <= pl.t) best = i;
+        idx = best;
+      }
+      buckets[idx].push(pl);
+    });
+    if (unstamped.length) {
+      const per = Math.max(1, Math.ceil(unstamped.length / n));
+      for (let i = 0; i < n; i++) buckets[i].push(...unstamped.slice(i * per, (i + 1) * per));
+    }
+    const segs = [];
+    for (let i = 0; i < n; i++) {
+      const { start, end, custom } = ranges[i];
+      const title = defaultTitle(i, n);
+      const lines = buckets[i].map((b) => b.text).filter(Boolean).join(' ');
+      const p = prev && prev[i];
       segs.push({
         id: `scene-${i + 1}`,
         sceneNumber: i + 1,
@@ -1769,7 +1804,8 @@ export default function DDCDirectorStudio() {
         duration: end - start,
         customTimes: custom,
         energyLevel: (p && typeof p.energyLevel === 'number') ? p.energyLevel : defaultEnergy(title),
-        lyrics: lines || (p && p.lyrics) || '(Instrumental / Beat)',
+        lyrics: (p && p.lyricsLocked && p.lyrics) ? p.lyrics : (lines || (p && p.lyrics) || '(Instrumental / Beat)'),
+        lyricsLocked: (p && p.lyricsLocked) || false,
         shotType: (p && p.shotType) || (i % 2 === 0 ? 'Lip sync' : 'Motion clip'),
         lipSyncEnabled: (p && typeof p.lipSyncEnabled === 'boolean') ? p.lipSyncEnabled : (i % 2 === 0),
         characterAction: (p && p.characterAction) || (i % 2 === 0 ? 'Stands looking into lens' : 'Runs through dark alleyway'),
@@ -2146,16 +2182,73 @@ export default function DDCDirectorStudio() {
     );
   };
 
+  // Universal scene tag: "Scene 1 — Intro". Used on every scene header and as the
+  // prefix of every copied/generated prompt, so numbers always match her Time Slices.
+  const sceneTag = (s) => `Scene ${s.sceneNumber} — ${s.title}`;
+
+  // Shared section-label editor (same select + custom-text control), used in
+  // Director Step 3 and the Timeline Time Slices.
+  const renderSectionLabelEditor = (index, s) => {
+    const inList = SECTION_LABELS.includes(s.title);
+    return (
+      <div className="flex gap-2">
+        <select
+          value={inList ? s.title : '__custom'}
+          onChange={(e) => { const v = e.target.value; if (v !== '__custom') updateScene(index, { title: v }); }}
+          className="flex-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
+        >
+          {SECTION_LABELS.map(l => <option key={l} value={l}>{l}</option>)}
+          <option value="__custom">Custom…</option>
+        </select>
+        <input
+          type="text"
+          value={s.title}
+          onChange={(e) => updateScene(index, { title: e.target.value })}
+          placeholder="Custom label"
+          className="flex-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
+        />
+      </div>
+    );
+  };
+
+  // Shared per-scene lyrics editor. Editing locks the scene so "Distribute lines
+  // across scenes" and re-slices never overwrite her fix; Re-sync hands it back.
+  const renderLyricsEditor = (index, s) => (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] uppercase font-bold text-slate-500">Lyrics</span>
+        <div className="flex items-center gap-1.5">
+          {s.lyricsLocked && (
+            <span className="text-[9px] font-bold bg-amber-950 text-amber-300 px-1.5 py-0.5 rounded border border-amber-800">LOCKED</span>
+          )}
+          {s.lyricsLocked && (
+            <button onClick={() => updateScene(index, { lyricsLocked: false })} className="text-[10px] text-cyan-400 hover:text-cyan-300 underline">Re-sync</button>
+          )}
+        </div>
+      </div>
+      <textarea
+        rows={2}
+        value={s.lyrics || ''}
+        onChange={(e) => updateScene(index, { lyrics: e.target.value, lyricsLocked: true })}
+        placeholder="Lyrics for this scene…"
+        className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-slate-200 focus:outline-none focus:border-fuchsia-500"
+      />
+      {!s.lyricsLocked && (
+        <p className="text-[10px] text-slate-600">Editing locks this scene — auto-distribute won't touch it. Hit Re-sync to hand it back.</p>
+      )}
+    </div>
+  );
+
   /* ------------------------- Director: Bible copy-all ------------------------- */
   const copyAllBible = () => {
     const text = segments.map(s => {
       const charsLine = sceneCharacterLine(s);
       return (
-        `SCENE ${s.sceneNumber} — ${fmtClock(s.startTime)}–${fmtClock(s.endTime)} (${s.title})${s.lipSyncEnabled ? ' [LIP SYNC]' : ''}\n` +
+        `${sceneTag(s)} · ${fmtClock(s.startTime)}–${fmtClock(s.endTime)}${s.lipSyncEnabled ? ' [LIP SYNC]' : ''}\n` +
         (charsLine ? charsLine + '\n' : '') +
         `Lyrics: ${s.lyrics}\n` +
         `Image: ${s.imageName || (s.keyframeImageUrl ? 'uploaded still' : '(no image uploaded yet)')}\n` +
-        `Production prompt: ${expandMentions(s.biblePrompt || compileBiblePrompt(s))}`
+        `Production prompt: ${sceneTag(s)}: ${expandMentions(s.biblePrompt || compileBiblePrompt(s))}`
       );
     }).join('\n\n---\n\n');
     copyText('bible-all', text || 'No scenes yet.');
@@ -2166,10 +2259,10 @@ export default function DDCDirectorStudio() {
     const text = segments.map(s => {
       const charsLine = sceneCharacterLine(s);
       return (
-        `SCENE ${s.sceneNumber} — ${fmtClock(s.startTime)}–${fmtClock(s.endTime)} (${s.title})${s.lipSyncEnabled ? ' [LIP SYNC]' : ''}\n` +
+        `${sceneTag(s)} · ${fmtClock(s.startTime)}–${fmtClock(s.endTime)}${s.lipSyncEnabled ? ' [LIP SYNC]' : ''}\n` +
         (charsLine ? charsLine + '\n' : '') +
         `Lyrics: ${s.lyrics}\n` +
-        `Image prompt: ${expandMentions(s.approvedPrompt || compilePromptForScene(s))}`
+        `Image prompt: ${sceneTag(s)}: ${expandMentions(s.approvedPrompt || compilePromptForScene(s))}`
       );
     }).join('\n\n---\n\n');
     copyText('imgprompts-all', text || 'No scenes yet.');
@@ -2195,6 +2288,7 @@ export default function DDCDirectorStudio() {
       setSegments(prev => {
         const next = prev.map(scene => {
           const hits = out.segments.filter(s => s.start < scene.endTime && s.end > scene.startTime);
+          if (scene.lyricsLocked) return scene;
           if (hits.length) return { ...scene, lyrics: hits.map(h => h.text).join(' ').trim() };
           return scene;
         });
@@ -2705,38 +2799,43 @@ export default function DDCDirectorStudio() {
                 </p>
               )}
               {segments.map((seg, idx) => (
-                <div key={seg.id} className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl flex items-center justify-between hover:border-slate-700 transition">
-                  <div className="flex items-center space-x-3 min-w-0">
-                    <button
-                      onClick={() => (isPlaying && activeSceneIndex === idx) ? pauseAudio() : playScene(idx)}
-                      disabled={!audio}
-                      className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-cyan-400 flex items-center justify-center transition flex-shrink-0"
-                    >
-                      {isPlaying && activeSceneIndex === idx ? <Pause className="w-3.5 h-3.5 fill-current" /> : <Play className="w-3.5 h-3.5 fill-current ml-0.5" />}
-                    </button>
-                    <div className="min-w-0">
-                      <div className="flex items-center space-x-2 mb-0.5">
-                        <SectionBadge title={seg.title} />
-                        <span className="text-[11px] font-mono text-cyan-400">{formatTime(seg.startTime).slice(0, 5)}</span>
-                        {(seg.clipUrl || (seg.videoGen && seg.videoGen.url)) && (
-                          <span className="text-[9px] font-bold bg-emerald-950 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-800 flex items-center">
-                            <Video className="w-2.5 h-2.5 mr-0.5" /> CLIP
-                          </span>
-                        )}
-                        {seg.keyframeImageUrl && (
-                          <span className="text-[9px] font-bold bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-800">STILL</span>
-                        )}
+                <div key={seg.id} className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl space-y-2 hover:border-slate-700 transition">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-3 min-w-0">
+                      <button
+                        onClick={() => (isPlaying && activeSceneIndex === idx) ? pauseAudio() : playScene(idx)}
+                        disabled={!audio}
+                        className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-cyan-400 flex items-center justify-center transition flex-shrink-0"
+                      >
+                        {isPlaying && activeSceneIndex === idx ? <Pause className="w-3.5 h-3.5 fill-current" /> : <Play className="w-3.5 h-3.5 fill-current ml-0.5" />}
+                      </button>
+                      <div className="min-w-0">
+                        <div className="flex items-center space-x-2 mb-0.5 flex-wrap gap-y-1">
+                          <span className="text-[10px] font-black text-slate-300">{sceneTag(seg)}</span>
+                          <SectionBadge title={seg.title} />
+                          <span className="text-[11px] font-mono text-cyan-400">{formatTime(seg.startTime).slice(0, 5)}</span>
+                          {(seg.clipUrl || (seg.videoGen && seg.videoGen.url)) && (
+                            <span className="text-[9px] font-bold bg-emerald-950 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-800 flex items-center">
+                              <Video className="w-2.5 h-2.5 mr-0.5" /> CLIP
+                            </span>
+                          )}
+                          {seg.keyframeImageUrl && (
+                            <span className="text-[9px] font-bold bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-800">STILL</span>
+                          )}
+                        </div>
                       </div>
-                      <div className="text-[11px] text-slate-400 line-clamp-1 italic">"{seg.lyrics}"</div>
                     </div>
+                    <button
+                      onClick={() => { setSelectedSceneIndex(idx); setActiveTab('scenes'); }}
+                      className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-lg flex items-center space-x-1 transition flex-shrink-0 ml-2"
+                    >
+                      <span>Design</span>
+                      <ChevronRight className="w-3 h-3" />
+                    </button>
                   </div>
-                  <button
-                    onClick={() => { setSelectedSceneIndex(idx); setActiveTab('scenes'); }}
-                    className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-lg flex items-center space-x-1 transition flex-shrink-0 ml-2"
-                  >
-                    <span>Design</span>
-                    <ChevronRight className="w-3 h-3" />
-                  </button>
+                  {renderTimeEditor(idx, seg)}
+                  {renderSectionLabelEditor(idx, seg)}
+                  {renderLyricsEditor(idx, seg)}
                 </div>
               ))}
             </div>
@@ -2779,7 +2878,7 @@ export default function DDCDirectorStudio() {
                         isSelected ? 'bg-cyan-500 text-slate-950 border-cyan-400 font-bold shadow-md shadow-cyan-500/20' : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-800'
                       }`}
                     >
-                      <span className="mb-1">Scene {s.sceneNumber}</span>
+                      <span className="mb-1">{sceneTag(s)}</span>
                       {sortByEnergy ? (
                         <span className={`text-[9px] px-1.5 rounded-sm flex items-center font-bold ${isSelected ? 'bg-cyan-900/50 text-cyan-100' : 'bg-slate-800 text-amber-400'}`}>
                           <Zap className="w-2.5 h-2.5 mr-0.5" /> Lvl {s.energyLevel}
@@ -2805,8 +2904,8 @@ export default function DDCDirectorStudio() {
                         <Zap className="w-3 h-3 mr-1 fill-current" /> Energy {scene.energyLevel}/10
                       </span>
                     </div>
-                    <h2 className="text-base font-bold text-white mt-1">Scene {scene.sceneNumber}: {scene.title}</h2>
-                    <p className="text-[11px] text-slate-400 italic mt-1">"{scene.lyrics}"</p>
+                    <h2 className="text-base font-bold text-white mt-1">{sceneTag(scene)}</h2>
+                    {renderLyricsEditor(selectedSceneIndex, scene)}
                     <div className="mt-2">{renderTimeEditor(selectedSceneIndex, scene)}</div>
                   </div>
 
@@ -2871,7 +2970,7 @@ export default function DDCDirectorStudio() {
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
                       <label className="text-xs font-bold text-slate-300">B-roll prompt <span className="text-slate-500 font-normal">(atmosphere cutaway)</span></label>
-                      <button onClick={() => copyText('broll', expandMentions(scene.brollPrompt || compileBrollPrompt(scene)))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
+                      <button onClick={() => copyText('broll', sceneTag(scene) + ': ' + expandMentions(scene.brollPrompt || compileBrollPrompt(scene)))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
                         {copyFeedback === 'broll' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'broll' ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
@@ -2887,7 +2986,7 @@ export default function DDCDirectorStudio() {
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
                       <label className="text-xs font-bold text-slate-300">Lip sync prompt <span className="text-slate-500 font-normal">(close-up performance)</span></label>
-                      <button onClick={() => copyText('lipsync', expandMentions(scene.lipsyncPrompt || compileLipSyncPrompt(scene)))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
+                      <button onClick={() => copyText('lipsync', sceneTag(scene) + ': ' + expandMentions(scene.lipsyncPrompt || compileLipSyncPrompt(scene)))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
                         {copyFeedback === 'lipsync' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'lipsync' ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
@@ -2903,7 +3002,7 @@ export default function DDCDirectorStudio() {
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
                       <label className="text-xs font-bold text-slate-300">Image → video prompt <span className="text-slate-500 font-normal">(paste into Runway)</span></label>
-                      <button onClick={() => copyText('videop', expandMentions(scene.videoPrompt || compileVideoPrompt(scene)))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
+                      <button onClick={() => copyText('videop', sceneTag(scene) + ': ' + expandMentions(scene.videoPrompt || compileVideoPrompt(scene)))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
                         {copyFeedback === 'videop' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'videop' ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
@@ -3144,7 +3243,7 @@ export default function DDCDirectorStudio() {
                   {segments.map((s) => (
                     <div key={s.id} className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl">
                       <div className="flex items-center space-x-2 mb-1 flex-wrap gap-y-1">
-                        <span className="text-[10px] font-black text-slate-300">Scene {s.sceneNumber}</span>
+                        <span className="text-[10px] font-black text-slate-300">{sceneTag(s)}</span>
                         <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
                         <SectionBadge title={s.title} />
                         {s.keyframeImageUrl && (
@@ -3169,37 +3268,18 @@ export default function DDCDirectorStudio() {
                   The auto-guess is just a starting point — set each interval to the real part of the song. Split verses get their own labels (Verse 1a, Verse 1b…).
                 </p>
                 <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
-                  {segments.map((s, i) => {
-                    const inList = SECTION_LABELS.includes(s.title);
-                    return (
-                      <div key={s.id} className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl space-y-2">
-                        <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-                          <span className="text-[10px] font-black text-slate-300">Scene {s.sceneNumber}</span>
-                          <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
-                          <SectionBadge title={s.title} />
-                        </div>
-                        {renderTimeEditor(i, s)}
-                        <p className="text-[11px] text-slate-400 italic line-clamp-1">"{s.lyrics}"</p>
-                        <div className="flex gap-2">
-                          <select
-                            value={inList ? s.title : '__custom'}
-                            onChange={(e) => { const v = e.target.value; if (v !== '__custom') updateScene(i, { title: v }); }}
-                            className="flex-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
-                          >
-                            {SECTION_LABELS.map(l => <option key={l} value={l}>{l}</option>)}
-                            <option value="__custom">Custom…</option>
-                          </select>
-                          <input
-                            type="text"
-                            value={s.title}
-                            onChange={(e) => updateScene(i, { title: e.target.value })}
-                            placeholder="Custom label"
-                            className="flex-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
-                          />
-                        </div>
+                  {segments.map((s, i) => (
+                    <div key={s.id} className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl space-y-2">
+                      <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+                        <span className="text-[10px] font-black text-slate-300">{sceneTag(s)}</span>
+                        <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
+                        <SectionBadge title={s.title} />
                       </div>
-                    );
-                  })}
+                      {renderTimeEditor(i, s)}
+                      {renderSectionLabelEditor(i, s)}
+                      {renderLyricsEditor(i, s)}
+                    </div>
+                  ))}
                 </div>
                 {!segments.length && (
                   <p className="text-xs text-slate-500 bg-slate-900/60 border border-slate-800 rounded-xl p-4 text-center">
@@ -3274,7 +3354,7 @@ export default function DDCDirectorStudio() {
                 {segments.map((s, i) => (
                   <div key={s.id} className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg">
                     <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-                      <span className="text-[10px] font-black text-slate-300">Scene {s.sceneNumber}</span>
+                      <span className="text-[10px] font-black text-slate-300">{sceneTag(s)}</span>
                       <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
                       <SectionBadge title={s.title} />
                       {s.lipSyncEnabled && (
@@ -3285,7 +3365,7 @@ export default function DDCDirectorStudio() {
                     <div className="flex justify-between items-center">
                       <label className="text-[10px] uppercase font-bold text-slate-400">Text-to-image prompt <span className="text-slate-600 normal-case">(Fooocus)</span></label>
                       <button
-                        onClick={() => copyText('imgp-' + s.id, expandMentions(s.approvedPrompt || compilePromptForScene(s)))}
+                        onClick={() => copyText('imgp-' + s.id, sceneTag(s) + ': ' + expandMentions(s.approvedPrompt || compilePromptForScene(s)))}
                         className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-emerald-400 px-2 py-1 rounded flex items-center space-x-1 transition"
                       >
                         {copyFeedback === ('imgp-' + s.id) ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
@@ -3337,7 +3417,7 @@ export default function DDCDirectorStudio() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-                        <span className="text-[10px] font-black text-slate-300">Scene {s.sceneNumber}</span>
+                        <span className="text-[10px] font-black text-slate-300">{sceneTag(s)}</span>
                         <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
                         <SectionBadge title={s.title} />
                       </div>
@@ -3379,7 +3459,7 @@ export default function DDCDirectorStudio() {
                   return (
                     <div key={s.id} className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg">
                       <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-                        <span className="text-[10px] font-black text-slate-300">Scene {s.sceneNumber}</span>
+                        <span className="text-[10px] font-black text-slate-300">{sceneTag(s)}</span>
                         <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
                         <SectionBadge title={s.title} />
                         {s.lipSyncEnabled && (
@@ -3467,7 +3547,7 @@ export default function DDCDirectorStudio() {
                 {segments.map((s, i) => (
                   <div key={s.id} className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg">
                     <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-                      <span className="text-[10px] font-black text-slate-300">Scene {s.sceneNumber}</span>
+                      <span className="text-[10px] font-black text-slate-300">{sceneTag(s)}</span>
                       <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
                       <SectionBadge title={s.title} />
                       {s.lipSyncEnabled && (
@@ -3490,7 +3570,7 @@ export default function DDCDirectorStudio() {
                     <div className="flex justify-between items-center">
                       <label className="text-[10px] uppercase font-bold text-slate-400">Production prompt <span className="text-slate-600 normal-case">(your video generator)</span></label>
                       <button
-                        onClick={() => copyText('bible-' + s.id, expandMentions(s.biblePrompt || compileBiblePrompt(s)))}
+                        onClick={() => copyText('bible-' + s.id, sceneTag(s) + ': ' + expandMentions(s.biblePrompt || compileBiblePrompt(s)))}
                         className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition"
                       >
                         {copyFeedback === ('bible-' + s.id) ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
@@ -3544,7 +3624,7 @@ export default function DDCDirectorStudio() {
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-                          <span className="text-[10px] font-black text-slate-300">Scene {s.sceneNumber}</span>
+                          <span className="text-[10px] font-black text-slate-300">{sceneTag(s)}</span>
                           <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
                           {hasClip ? (
                             <span className="text-[9px] font-bold bg-emerald-950 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-800">CLIP ✓</span>
