@@ -1636,20 +1636,19 @@ export default function DDCDirectorStudio() {
 
   /* ------------------------- prompt compilers ------------------------- */
   const compilePromptForScene = (scene) => {
-    return `Cinematic music video, ${lockedStyle.descriptor}. Character: ${describeChar(lockedChar)}. Setting: ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}. Camera: ${scene.cameraAngle}, ${scene.cameraMovement}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. 9:16 vertical.`;
+    return `Cinematic music video keyframe still, ${lockedStyle.descriptor}. Environment: ${scene.setting || lockedTheme.notes} \u2014 rich atmosphere, texture, and depth in frame. Camera: ${scene.cameraAngle}, ${scene.cameraMovement}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, high detail, 9:16 vertical.`;
   };
   const compileBrollPrompt = (scene) => {
     return `B-roll cutaway, cinematic music video, ${lockedStyle.descriptor}. No lip sync — pure atmosphere and texture. Setting: ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}. Camera: ${scene.cameraAngle}, slow ${scene.cameraMovement.toLowerCase()}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, 9:16 vertical.`;
   };
   const compileLipSyncPrompt = (scene) => {
-    return `Extreme close-up lip sync shot, cinematic music video. Character: ${describeChar(lockedChar)}, singing directly into the lens, emotive, mouth forming the lyric "{{LYRIC}}". Camera: intimate close-up, subtle slow dolly in. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, shallow depth of field, 9:16 vertical.`;
+    return `Extreme close-up lip sync shot, cinematic music video. The character from the reference image sings directly into the lens, emotive, mouth forming the lyric "{{LYRIC}}". Keep face, wardrobe, and identity exactly as the reference image. Camera: intimate close-up, subtle slow dolly in. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, shallow depth of field, 9:16 vertical.`;
   };
   const compileVideoPrompt = (scene) => {
-    return `${scene.characterAction}, ${scene.cameraMovement.toLowerCase()} camera move, ${scene.cameraAngle.toLowerCase()}. Setting: ${scene.setting || lockedTheme.notes}. Lighting: ${scene.lightingMood}. Character: ${describeChar(lockedChar)}. Colors: [${lockedPalette.hexes.join(', ')}]. Cinematic photorealistic motion, smooth natural movement, 9:16 vertical video.`;
+    return `${scene.characterAction}, ${scene.cameraMovement.toLowerCase()} camera move, ${scene.cameraAngle.toLowerCase()}. Setting: ${scene.setting || lockedTheme.notes}. Lighting: ${scene.lightingMood}. The character from the reference image performs the action \u2014 keep face, wardrobe, and identity exactly as the reference image. Lyric for this shot: "{{LYRIC}}". Colors: [${lockedPalette.hexes.join(', ')}]. Cinematic photorealistic motion, smooth natural movement, 9:16 vertical video.`;
   };
   // Full DIY production prompt for the Bible: paste into Runway / Kling yourself.
   const compileBiblePrompt = (scene) => {
-    const charLine = `Character: ${describeChar(lockedChar)}.`;
     const sceneLine = `Scene (${scene.title}): ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}.`;
     const camLine = `Camera angle: ${scene.cameraAngle}. Camera movement: ${scene.cameraMovement}.`;
     const lookLine = `Lighting and mood: ${scene.lightingMood}. Palette: [${lockedPalette.hexes.join(', ')}]. Style: ${lockedStyle.descriptor}.`;
@@ -1657,7 +1656,7 @@ export default function DDCDirectorStudio() {
       ? ` LIP SYNC DIRECTIONS: extreme close-up on the character's face, singing directly into the lens for the full shot — mouth and lip movements must visibly match the lyric being sung: "{{LYRIC}}". Keep the face centered, sharp, and in focus the entire time; subtle slow dolly-in, no cuts away from the face.`
       : '';
     const diyLine = ` Wardrobe continuity: same wardrobe (${lockedChar.wardrobe || lockedChar.outfit || 'signature outfit'}) in every shot; keep the character's face identical across all scenes. Vertical 9:16, photorealistic cinematic music video. Lyric for this shot: "{{LYRIC}}".`;
-    return `${charLine} ${sceneLine} ${camLine} ${lookLine}${syncLine}${diyLine}`;
+    return `${sceneLine} ${camLine} ${lookLine}${syncLine}${diyLine}`;
   };
 
   /* ------------------------- @mention engine ------------------------- */
@@ -1696,14 +1695,29 @@ export default function DDCDirectorStudio() {
     return `Character portrait reference for ${p.name} (@${h}).\n\n${desc}${notesLine}\n\nArt style: ${lockedStyle.descriptor}. Palette mood: ${lockedPalette.mood} [${lockedPalette.hexes.join(', ')}]. World: ${lockedTheme.name} — ${lockedTheme.notes}.\n\nFraming: clean character reference, neutral mid-gray background, upper body, facing the camera, neutral expression, consistent facial features, even studio lighting, photorealistic, high detail, 9:16 vertical.`;
   };
   // Inserts "@handle " into a prompt textarea at the cursor (or appends).
+  // Remembers each prompt textarea's caret position (survives blur, which tapping a
+  // MentionBar button causes) so @mentions land where the cursor was, not at the end.
+  const lastCaretRef = useRef({});
+  const trackCaret = (textareaId, e) => {
+    const el = e && e.target;
+    if (el && typeof el.selectionStart === 'number') {
+      lastCaretRef.current[textareaId] = { pos: el.selectionStart };
+    }
+  };
   const insertMention = (sceneIndex, field, textareaId, baseText, handle) => {
     const token = '@' + handle + ' ';
     const el = document.getElementById(textareaId);
     let cur = baseText || '';
     let pos = cur.length;
-    if (el && document.activeElement === el && typeof el.selectionStart === 'number') {
+    if (el && typeof el.selectionStart === 'number') {
+      // selectionStart persists after blur, so this still reflects the last cursor spot
       cur = el.value;
-      pos = el.selectionStart;
+      pos = Math.min(Math.max(el.selectionStart, 0), el.value.length);
+    } else {
+      const cached = lastCaretRef.current[textareaId];
+      if (cached && typeof cached.pos === 'number') {
+        pos = Math.min(Math.max(cached.pos, 0), cur.length);
+      }
     }
     const next = cur.slice(0, pos) + token + cur.slice(pos);
     updateScene(sceneIndex, { [field]: next });
@@ -3126,6 +3140,8 @@ export default function DDCDirectorStudio() {
                     <textarea id={'prompt-broll-' + scene.id} rows={3} value={scene.brollPrompt || compileBrollPrompt(scene)}
                       onChange={(e) => { updateScene(selectedSceneIndex, { brollPrompt: e.target.value }); detectAt(e, 'broll'); }}
                       onKeyUp={(e) => detectAt(e, 'broll')}
+                      onSelect={(e) => trackCaret('prompt-broll-' + scene.id, e)}
+                      onBlur={(e) => trackCaret('prompt-broll-' + scene.id, e)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500" />
                     {atQuery && atQuery.key === 'broll' && (
                       <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'brollPrompt', 'prompt-broll-' + scene.id, 'broll', h)} />
@@ -3142,6 +3158,8 @@ export default function DDCDirectorStudio() {
                     <textarea id={'prompt-lipsync-' + scene.id} rows={3} value={scene.lipsyncPrompt || compileLipSyncPrompt(scene)}
                       onChange={(e) => { updateScene(selectedSceneIndex, { lipsyncPrompt: e.target.value }); detectAt(e, 'lipsync'); }}
                       onKeyUp={(e) => detectAt(e, 'lipsync')}
+                      onSelect={(e) => trackCaret('prompt-lipsync-' + scene.id, e)}
+                      onBlur={(e) => trackCaret('prompt-lipsync-' + scene.id, e)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500" />
                     {atQuery && atQuery.key === 'lipsync' && (
                       <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'lipsyncPrompt', 'prompt-lipsync-' + scene.id, 'lipsync', h)} />
@@ -3159,6 +3177,8 @@ export default function DDCDirectorStudio() {
                     <textarea id={'prompt-video-' + scene.id} rows={3} value={scene.videoPrompt || compileVideoPrompt(scene)}
                       onChange={(e) => { updateScene(selectedSceneIndex, { videoPrompt: e.target.value }); detectAt(e, 'videop'); }}
                       onKeyUp={(e) => detectAt(e, 'videop')}
+                      onSelect={(e) => trackCaret('prompt-video-' + scene.id, e)}
+                      onBlur={(e) => trackCaret('prompt-video-' + scene.id, e)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-purple-500" />
                     {atQuery && atQuery.key === 'videop' && (
                       <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'videoPrompt', 'prompt-video-' + scene.id, 'videop', h)} />
@@ -3534,6 +3554,8 @@ export default function DDCDirectorStudio() {
                       value={s.approvedPrompt || compilePromptForScene(s)}
                       onChange={(e) => { updateScene(i, { approvedPrompt: e.target.value }); detectAt(e, 'img-' + s.id); }}
                       onKeyUp={(e) => detectAt(e, 'img-' + s.id)}
+                      onSelect={(e) => trackCaret('prompt-img-' + s.id, e)}
+                      onBlur={(e) => trackCaret('prompt-img-' + s.id, e)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-emerald-500"
                     />
                     {atQuery && atQuery.key === ('img-' + s.id) && (
@@ -3647,6 +3669,8 @@ export default function DDCDirectorStudio() {
                             value={s.videoPrompt || compileVideoPrompt(s)}
                             onChange={(e) => { updateScene(i, { videoPrompt: e.target.value }); detectAt(e, 'vid-' + s.id); }}
                             onKeyUp={(e) => detectAt(e, 'vid-' + s.id)}
+                            onSelect={(e) => trackCaret('prompt-vid-' + s.id, e)}
+                            onBlur={(e) => trackCaret('prompt-vid-' + s.id, e)}
                             className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-emerald-500"
                           />
                           {atQuery && atQuery.key === ('vid-' + s.id) && (
@@ -3739,6 +3763,8 @@ export default function DDCDirectorStudio() {
                       value={s.biblePrompt || compileBiblePrompt(s)}
                       onChange={(e) => { updateScene(i, { biblePrompt: e.target.value }); detectAt(e, 'bible-' + s.id); }}
                       onKeyUp={(e) => detectAt(e, 'bible-' + s.id)}
+                      onSelect={(e) => trackCaret('prompt-bible-' + s.id, e)}
+                      onBlur={(e) => trackCaret('prompt-bible-' + s.id, e)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
                     />
                     {atQuery && atQuery.key === ('bible-' + s.id) && (
