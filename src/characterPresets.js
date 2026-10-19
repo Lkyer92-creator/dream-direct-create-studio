@@ -8,18 +8,18 @@
 export const BUILTIN_CHARACTER_PRESETS = [
   /* ============================ WOMEN (20) ============================ */
   {
-    id: 'builtin-w01', name: '⚡ Neon Vex', handle: 'neonVex', category: 'women',
+    id: 'builtin-w01', name: '⚡ Neon lex', handle: 'neonVex', category: 'women',
     skinTone: 'rain-slicked olive skin catching magenta neon',
-    build: 'slim and wiry, 5\'7"',
+    build: 'slim and wiry, 5\'2"',
     faceShape: 'angular, sharp cheekbones',
-    marks: 'faint circuit-line tattoos tracing up her neck, silver nose ring, AR monocle over left eye',
-    hair: 'Half-shaved head, long electric-blue braids on one side woven with fiber-optic strands',
+    marks: 'neon pink circuit-line tattoos tracing up her neck, silver nose ring, AR headset',
+    hair: 'Half-shaved head, long electric-pink braids on one side woven with neon cyan fiber-optic strands',
     headwear: '',
     mood: 'defiant smirk, sharp gaze — rebellious, wired, untouchable',
-    artStyle: 'neon-drenched cyberpunk photorealism',
-    wardrobe: 'Cropped black techwear jacket with glowing cyan seams, cargo pants with strapped-on drive cases',
+    artStyle: 'pink neon-drenched cyberpunk photorealism',
+    wardrobe: 'Cropped black crop top with glowing pink seams, camo pants with strapped-on drive cases',
     accessories: 'Fingerless data-gloves',
-    notes: 'Theme: neon-drenched underground data haven.',
+    notes: 'Theme: pink and cyan neon-drenched underground data haven.',
   },
   {
     id: 'builtin-w02', name: '🌹 Marlene Vale', handle: 'velvetMarlene', category: 'women',
