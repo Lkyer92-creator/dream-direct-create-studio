@@ -456,6 +456,8 @@ function withHandles(arr) {
    (face/outfit/styleNotes) are still read as a fallback for old saves. */
 function charSummary(c) {
   const bits = [];
+  const ageGender = [c.age, c.gender].filter(Boolean).join(' ');
+  if (ageGender) bits.push(ageGender);
   const phys = [c.skinTone, c.build].filter(Boolean).join(', ');
   if (phys) bits.push(phys);
   const faceBits = [c.faceShape ? `${c.faceShape} face` : '', c.marks].filter(Boolean).join(', ');
@@ -486,10 +488,12 @@ function charBlurb(c) {
 }
 /* Detail fields for the character editor form (label pairs). */
 const CHAR_DETAIL_FIELDS = [
-  ['skinTone', 'Skin tone'],
+  ['age', 'Age'],
+  ['gender', 'Gender'],
+  ['skinTone', 'Skin tone / ethnicity'],
   ['build', 'Build / size'],
   ['faceShape', 'Face shape'],
-  ['marks', 'Marks — freckles, scars, tattoos, piercings'],
+  ['marks', 'Facial features — freckles, scars, tattoos, piercings'],
   ['hair', 'Hair'],
   ['headwear', 'Headwear — hats etc.'],
   ['mood', 'Mood / expression'],
@@ -497,7 +501,7 @@ const CHAR_DETAIL_FIELDS = [
   ['wardrobe', 'Wardrobe'],
   ['accessories', 'Accessories'],
 ];
-const CHAR_ALL_FIELDS = ['skinTone', 'build', 'faceShape', 'marks', 'hair', 'headwear', 'mood', 'artStyle', 'wardrobe', 'accessories', 'notes'];
+const CHAR_ALL_FIELDS = ['age', 'gender', 'skinTone', 'build', 'faceShape', 'marks', 'hair', 'headwear', 'mood', 'artStyle', 'wardrobe', 'accessories', 'notes'];
 /* Story roles — Lindsey's key: 🌟 Lead, ❤️ Co-lead, 💜 Confidant, 💙 Mentor,
    💛 Light, 🩷 Muse, 💔 Tragic figure, 💀 Antagonist.
    `role` lives on the character (library + cast so it carries into future
@@ -514,7 +518,7 @@ const CHARACTER_ROLES = [
 ];
 function roleDef(id) { return CHARACTER_ROLES.find(r => r.id === id) || null; }
 /* Fields that exist ONLY in the new shape ('hair' is shared with the legacy blob). */
-const MODERN_KEYS = ['skinTone', 'build', 'faceShape', 'marks', 'headwear', 'mood', 'artStyle', 'wardrobe', 'accessories', 'notes'];
+const MODERN_KEYS = ['age', 'gender', 'skinTone', 'build', 'faceShape', 'marks', 'headwear', 'mood', 'artStyle', 'wardrobe', 'accessories', 'notes'];
 function pickCharFields(src) {
   const o = {};
   CHAR_ALL_FIELDS.forEach(k => { o[k] = src[k] || ''; });
@@ -1161,6 +1165,7 @@ export default function DDCDirectorStudio() {
         shotType: s.shotType, lipSyncEnabled: s.lipSyncEnabled,
         characterAction: s.characterAction, cameraAngle: s.cameraAngle,
         cameraMovement: s.cameraMovement, setting: s.setting, lightingMood: s.lightingMood,
+        envFG: s.envFG || '', envMG: s.envMG || '', envBG: s.envBG || '', envProps: s.envProps || '',
         approvedPrompt: s.approvedPrompt, keyframeImageUrl: s.keyframeImageUrl,
         imageName: s.imageName || '', reviewStatus: s.reviewStatus || 'pending',
         brollPrompt: s.brollPrompt, lipsyncPrompt: s.lipsyncPrompt, videoPrompt: s.videoPrompt,
@@ -1780,29 +1785,62 @@ export default function DDCDirectorStudio() {
   };
 
   /* ------------------------- prompt compilers ------------------------- */
-  /* Text-to-image keyframe prompt (Fooocus): the full visual, self-contained.
-     Unlike video prompts, this one CAN'T reference uploaded images — the image doesn't
-     exist yet — so characters get their complete written descriptions, no @handles,
-     no tokens. Structured with line breaks for readability; Fooocus takes multiline. */
+  /* Text-to-image keyframe prompt (Fooocus), built on Lindsey's template:
+     header → per-character SUBJECT / POSE & ACTION → SCENE → ENVIRONMENT →
+     CAMERA → LIGHTING → COLOR & MOOD → STYLE & QUALITY → CONSISTENCY → AVOID →
+     VIDEO PREPARATION. Fully self-contained: full written character descriptions,
+     no @handles, no tokens. */
+  const fullAppearance = (c) => [
+    [c.age, c.gender].filter(Boolean).join(' '),
+    c.skinTone,
+    c.build,
+    c.faceShape ? `${c.faceShape} face` : '',
+    c.marks,
+    c.hair ? `${c.hair} hair` : '',
+    c.headwear,
+    c.wardrobe ? `wearing ${c.wardrobe}` : '',
+    c.accessories ? `accessories: ${c.accessories}` : '',
+  ].filter(Boolean).join(', ');
+  const charPoseAction = (c, i, scene) => {
+    const action = i === 0
+      ? (scene.characterAction || 'performing at center frame')
+      : (ROLE_BEATS[c.role] || 'present in frame, true to the scene');
+    const expr = c.mood ? ` Expression: ${c.mood}.` : '';
+    return `${action}.${expr}`;
+  };
   const compilePromptForScene = (scene) => {
     const people = scenePeople(scene);
-    const charBlocks = people.map((c) => {
+    const n = people.length;
+    const charSections = people.map((c, i) => {
       const rd = c.role ? roleDef(c.role) : null;
-      return `${c.name}${rd ? ` (${rd.label})` : ''}: ${charSummary(c)}`;
-    }).join('\n');
+      const tag = n > 1 ? ` (Character ${cast.findIndex(x => x.id === c.id) + 1})` : '';
+      const subj = `SUBJECT${tag}: ${c.name}${rd ? `, ${rd.label}` : ''} — ${fullAppearance(c)}`;
+      const pose = `POSE & ACTION${tag}: ${charPoseAction(c, i, scene)}`;
+      return `${subj}\n${pose}`;
+    }).join('\n\n');
     const lyricLine = (scene.lyrics || '').trim();
+    const fgDefault = people.map((c) => {
+      const ci = cast.findIndex(x => x.id === c.id) + 1;
+      const rd = c.role ? roleDef(c.role) : null;
+      return `Character ${ci} (${c.name}${rd ? `, ${rd.label}` : ''})`;
+    }).join(' and ');
+    const energy = scene.energyLevel || 5;
+    const intensity = energy >= 7 ? 'high intensity, dynamic motion' : energy >= 4 ? 'moderate motion' : 'slow, lingering motion';
     const lines = [
-      `${lockedStyle.descriptor} cinematic music video keyframe, 9:16 vertical, photorealistic, ultra detailed.`,
+      `Create a ${lockedStyle.descriptor} image in 9:16.`,
       '',
-      charBlocks,
+      charSections,
       '',
-      `Action: ${scene.characterAction || 'performing at center frame'}.`,
-      `Environment: ${scene.setting || lockedTheme.notes}.`,
-      `Camera: ${scene.cameraAngle}, ${scene.cameraMovement}.`,
-      `Lighting: ${scene.lightingMood}.`,
-      `Palette: ${lockedPalette.hexes.join(', ')}.`,
+      `SCENE: ${scene.setting || lockedTheme.notes}${lyricLine ? ` — mood of the lyric: "${lyricLine}"` : ''}.`,
+      `ENVIRONMENT: Foreground: ${scene.envFG || fgDefault + ' in the foreground'}. Midground: ${scene.envMG || '—'}. Background: ${scene.envBG || (scene.setting || lockedTheme.notes)}. Props and details: ${scene.envProps || '—'}.`,
+      `CAMERA: ${scene.shotType || 'Motion clip'} shot, ${scene.cameraAngle} angle, ${scene.cameraMovement} perspective, vertical 9:16 framing, cinematic lens, sharp focus on the subjects with soft depth of field.`,
+      `LIGHTING: ${scene.lightingMood}; soft directional source, gentle shadows, luminous highlights.`,
+      `COLOR & MOOD: palette ${lockedPalette.hexes.join(', ')}${lockedPalette.mood ? `, ${lockedPalette.mood}` : ''}${lyricLine ? `; emotional tone of "${lyricLine}"` : ''}.`,
+      `STYLE & QUALITY: ${lockedStyle.descriptor}, photorealistic, ultra-detailed skin and fabric textures, polished cinematic finish.`,
+      `CONSISTENCY: keep every character's face, wardrobe, and identifying features identical across all keyframes of this video.`,
+      `AVOID: text, watermarks, logos, extra limbs, deformed hands, blurry faces.`,
+      `VIDEO PREPARATION: Character movement / action: ${scene.characterAction || 'performing at center frame'}. Facial expression changes: ${scene.lipSyncEnabled ? (lyricLine ? `lips move in sync with the lyric "${lyricLine}"` : 'lips move as if singing') : 'subtle expression shifts matching the mood'}. Camera movement (${scene.cameraMovement}). Background / environmental movement: subtle ambient drift. Motion speed / intensity: ${intensity}. Scene duration: ${(scene.duration || 0).toFixed(1)}s. Details that must remain unchanged: faces, wardrobe, identities.`,
     ];
-    if (lyricLine) { lines.push('', `Mood: "${lyricLine}".`); }
     return lines.join('\n');
   };
   const compileBrollPrompt = (scene) => {
@@ -2026,6 +2064,8 @@ export default function DDCDirectorStudio() {
         cameraMovement: (p && p.cameraMovement) || (i % 2 === 0 ? 'Dolly in' : 'Handheld'),
         setting: (p && p.setting) || 'Subterranean rain alley',
         lightingMood: (p && p.lightingMood) || 'High-contrast cyan rim lights',
+        envFG: (p && p.envFG) || '', envMG: (p && p.envMG) || '',
+        envBG: (p && p.envBG) || '', envProps: (p && p.envProps) || '',
         approvedPrompt: (p && p.approvedPrompt) || '',
         keyframeImageUrl: (p && p.keyframeImageUrl) || null,
         imageName: (p && p.imageName) || '',
@@ -2246,6 +2286,7 @@ export default function DDCDirectorStudio() {
       cameraMovement: (index % 2 === 0 ? 'Dolly in' : 'Handheld'),
       setting: 'Subterranean rain alley',
       lightingMood: 'High-contrast cyan rim lights',
+      envFG: '', envMG: '', envBG: '', envProps: '',
       approvedPrompt: '',
       keyframeImageUrl: null,
       imageName: '',
@@ -3838,6 +3879,23 @@ export default function DDCDirectorStudio() {
                     </div>
                     <p className="text-[11px] text-slate-400 italic">"{s.lyrics}"</p>
                     {renderSceneCastChips(i, s)}
+                    <details className="bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2">
+                      <summary className="text-[10px] font-bold text-slate-400 cursor-pointer select-none">Environment layers <span className="text-slate-600 font-normal">— foreground / midground / background / props</span></summary>
+                      <div className="grid grid-cols-1 gap-2 mt-2">
+                        {[['envFG', 'Foreground'], ['envMG', 'Midground'], ['envBG', 'Background'], ['envProps', 'Props & details']].map(([k, label]) => (
+                          <label key={k} className="block">
+                            <span className="text-[9px] uppercase font-bold text-slate-500">{label}</span>
+                            <input
+                              type="text"
+                              value={s[k] || ''}
+                              onChange={(e) => updateScene(i, { [k]: e.target.value })}
+                              placeholder={'—'}
+                              className="mt-0.5 w-full bg-slate-900 border border-slate-800 rounded-lg px-2 py-1.5 text-[11px] text-slate-200 focus:outline-none focus:border-emerald-500"
+                            />
+                          </label>
+                        ))}
+                      </div>
+                    </details>
                     <div className="flex justify-between items-center">
                       <label className="text-[10px] uppercase font-bold text-slate-400">Text-to-image prompt <span className="text-slate-600 normal-case">(Fooocus)</span></label>
                       <button
