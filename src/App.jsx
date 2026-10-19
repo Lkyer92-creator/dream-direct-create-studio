@@ -2995,8 +2995,14 @@ export default function DDCDirectorStudio() {
 
           return (
             <div className="space-y-5 animate-fadeIn">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <div className="flex items-center justify-between pb-2 border-b border-slate-800 flex-wrap gap-2">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">Shot Deck</h3>
+                <label className="flex items-center space-x-2 text-[11px] text-slate-400">
+                  <span className="font-bold uppercase tracking-wider">Star</span>
+                  <select value={look.characterId} onChange={(e) => writeLook({ ...look, characterId: e.target.value })} className="bg-slate-950 border border-slate-700 rounded-lg p-1.5 text-xs text-white focus:border-cyan-500 focus:outline-none max-w-[160px]">
+                    {cast.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </label>
                 <button
                   onClick={() => setSortByEnergy(!sortByEnergy)}
                   className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
