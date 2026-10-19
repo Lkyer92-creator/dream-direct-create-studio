@@ -1780,13 +1780,30 @@ export default function DDCDirectorStudio() {
   };
 
   /* ------------------------- prompt compilers ------------------------- */
+  /* Text-to-image keyframe prompt (Fooocus): the full visual, self-contained.
+     Unlike video prompts, this one CAN'T reference uploaded images — the image doesn't
+     exist yet — so characters get their complete written descriptions, no @handles,
+     no tokens. Structured with line breaks for readability; Fooocus takes multiline. */
   const compilePromptForScene = (scene) => {
     const people = scenePeople(scene);
-    const castLine = people.length
-      ? ` Characters in frame (from your reference images): ${joinCharLabels(people.map(castCharLabel))} — keep every face, wardrobe, and identity exactly as the reference images.`
-      : '';
+    const charBlocks = people.map((c) => {
+      const rd = c.role ? roleDef(c.role) : null;
+      return `${c.name}${rd ? ` (${rd.label})` : ''}: ${charSummary(c)}`;
+    }).join('\n');
     const lyricLine = (scene.lyrics || '').trim();
-    return `${sceneTag(scene)} — cinematic music video keyframe still, ${lockedStyle.descriptor}.${lyricLine ? ` Lyric of this shot: "${lyricLine}".` : ''}${castLine} Environment: ${scene.setting || lockedTheme.notes} — rich atmosphere, texture, and depth in frame. Camera: ${scene.cameraAngle}, ${scene.cameraMovement}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, high detail, 9:16 vertical.`;
+    const lines = [
+      `${lockedStyle.descriptor} cinematic music video keyframe, 9:16 vertical, photorealistic, ultra detailed.`,
+      '',
+      charBlocks,
+      '',
+      `Action: ${scene.characterAction || 'performing at center frame'}.`,
+      `Environment: ${scene.setting || lockedTheme.notes}.`,
+      `Camera: ${scene.cameraAngle}, ${scene.cameraMovement}.`,
+      `Lighting: ${scene.lightingMood}.`,
+      `Palette: ${lockedPalette.hexes.join(', ')}.`,
+    ];
+    if (lyricLine) { lines.push('', `Mood: "${lyricLine}".`); }
+    return lines.join('\n');
   };
   const compileBrollPrompt = (scene) => {
     return `B-roll cutaway, cinematic music video, ${lockedStyle.descriptor}. No lip sync — pure atmosphere and texture. Setting: ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}. Camera: ${scene.cameraAngle}, slow ${scene.cameraMovement.toLowerCase()}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, 9:16 vertical.`;
