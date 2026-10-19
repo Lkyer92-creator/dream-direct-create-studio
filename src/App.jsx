@@ -1642,7 +1642,7 @@ export default function DDCDirectorStudio() {
     return `B-roll cutaway, cinematic music video, ${lockedStyle.descriptor}. No lip sync — pure atmosphere and texture. Setting: ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}. Camera: ${scene.cameraAngle}, slow ${scene.cameraMovement.toLowerCase()}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, 9:16 vertical.`;
   };
   const compileLipSyncPrompt = (scene) => {
-    return `Extreme close-up lip sync shot, cinematic music video. Character: ${describeChar(lockedChar)}, singing directly into the lens, emotive, mouth forming the lyric "${scene.lyrics}". Camera: intimate close-up, subtle slow dolly in. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, shallow depth of field, 9:16 vertical.`;
+    return `Extreme close-up lip sync shot, cinematic music video. Character: ${describeChar(lockedChar)}, singing directly into the lens, emotive, mouth forming the lyric "{{LYRIC}}". Camera: intimate close-up, subtle slow dolly in. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, shallow depth of field, 9:16 vertical.`;
   };
   const compileVideoPrompt = (scene) => {
     return `${scene.characterAction}, ${scene.cameraMovement.toLowerCase()} camera move, ${scene.cameraAngle.toLowerCase()}. Setting: ${scene.setting || lockedTheme.notes}. Lighting: ${scene.lightingMood}. Character: ${describeChar(lockedChar)}. Colors: [${lockedPalette.hexes.join(', ')}]. Cinematic photorealistic motion, smooth natural movement, 9:16 vertical video.`;
@@ -1654,9 +1654,9 @@ export default function DDCDirectorStudio() {
     const camLine = `Camera angle: ${scene.cameraAngle}. Camera movement: ${scene.cameraMovement}.`;
     const lookLine = `Lighting and mood: ${scene.lightingMood}. Palette: [${lockedPalette.hexes.join(', ')}]. Style: ${lockedStyle.descriptor}.`;
     const syncLine = scene.lipSyncEnabled
-      ? ` LIP SYNC DIRECTIONS: extreme close-up on the character's face, singing directly into the lens for the full shot — mouth and lip movements must visibly match the lyric being sung: "${scene.lyrics}". Keep the face centered, sharp, and in focus the entire time; subtle slow dolly-in, no cuts away from the face.`
+      ? ` LIP SYNC DIRECTIONS: extreme close-up on the character's face, singing directly into the lens for the full shot — mouth and lip movements must visibly match the lyric being sung: "{{LYRIC}}". Keep the face centered, sharp, and in focus the entire time; subtle slow dolly-in, no cuts away from the face.`
       : '';
-    const diyLine = ` Wardrobe continuity: same wardrobe (${lockedChar.wardrobe || lockedChar.outfit || 'signature outfit'}) in every shot; keep the character's face identical across all scenes. Vertical 9:16, photorealistic cinematic music video. Lyric for this shot: "${scene.lyrics}".`;
+    const diyLine = ` Wardrobe continuity: same wardrobe (${lockedChar.wardrobe || lockedChar.outfit || 'signature outfit'}) in every shot; keep the character's face identical across all scenes. Vertical 9:16, photorealistic cinematic music video. Lyric for this shot: "{{LYRIC}}".`;
     return `${charLine} ${sceneLine} ${camLine} ${lookLine}${syncLine}${diyLine}`;
   };
 
@@ -1680,6 +1680,13 @@ export default function DDCDirectorStudio() {
       });
     });
     return out;
+  };
+  // Replaces {{LYRIC}} with the scene's CURRENT lyrics at copy time, so a prompt
+  // generated earlier always ships the latest lyric line. Textareas show the raw
+  // stored text (token visible); expansion happens only when copying.
+  const expandLyric = (text, scene) => {
+    if (!text || typeof text !== 'string') return text;
+    return text.split('{{LYRIC}}').join((scene && scene.lyrics) || '');
   };
   // Standalone Fooocus prompt for generating one character's reference portrait.
   const compilePortraitPrompt = (p) => {
@@ -2229,7 +2236,24 @@ export default function DDCDirectorStudio() {
       <textarea
         rows={2}
         value={s.lyrics || ''}
-        onChange={(e) => updateScene(index, { lyrics: e.target.value, lyricsLocked: true })}
+        onChange={(e) => {
+          const newLyric = e.target.value;
+          const oldLyric = s.lyrics || '';
+          if (oldLyric && oldLyric !== newLyric) {
+            // Upgrade stored prompts that baked the old lyric verbatim: swap it
+            // for the self-updating {{LYRIC}} token. Prompts she hand-customized
+            // (no verbatim match) are left untouched — her words always win.
+            const patch = { lyrics: newLyric, lyricsLocked: true };
+            ['lipsyncPrompt', 'videoPrompt', 'brollPrompt', 'biblePrompt', 'approvedPrompt'].forEach((f) => {
+              if (typeof s[f] === 'string' && s[f].includes(oldLyric)) {
+                patch[f] = s[f].split(oldLyric).join('{{LYRIC}}');
+              }
+            });
+            updateScene(index, patch);
+          } else {
+            updateScene(index, { lyrics: newLyric, lyricsLocked: true });
+          }
+        }}
         placeholder="Lyrics for this scene…"
         className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-slate-200 focus:outline-none focus:border-fuchsia-500"
       />
@@ -2248,7 +2272,7 @@ export default function DDCDirectorStudio() {
         (charsLine ? charsLine + '\n' : '') +
         `Lyrics: ${s.lyrics}\n` +
         `Image: ${s.imageName || (s.keyframeImageUrl ? 'uploaded still' : '(no image uploaded yet)')}\n` +
-        `Production prompt: ${sceneTag(s)}: ${expandMentions(s.biblePrompt || compileBiblePrompt(s))}`
+        `Production prompt: ${sceneTag(s)}: ${expandLyric(expandMentions(s.biblePrompt || compileBiblePrompt(s)), s)}`
       );
     }).join('\n\n---\n\n');
     copyText('bible-all', text || 'No scenes yet.');
@@ -2262,7 +2286,7 @@ export default function DDCDirectorStudio() {
         `${sceneTag(s)} · ${fmtClock(s.startTime)}–${fmtClock(s.endTime)}${s.lipSyncEnabled ? ' [LIP SYNC]' : ''}\n` +
         (charsLine ? charsLine + '\n' : '') +
         `Lyrics: ${s.lyrics}\n` +
-        `Image prompt: ${sceneTag(s)}: ${expandMentions(s.approvedPrompt || compilePromptForScene(s))}`
+        `Image prompt: ${sceneTag(s)}: ${expandLyric(expandMentions(s.approvedPrompt || compilePromptForScene(s)), s)}`
       );
     }).join('\n\n---\n\n');
     copyText('imgprompts-all', text || 'No scenes yet.');
@@ -2970,7 +2994,7 @@ export default function DDCDirectorStudio() {
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
                       <label className="text-xs font-bold text-slate-300">B-roll prompt <span className="text-slate-500 font-normal">(atmosphere cutaway)</span></label>
-                      <button onClick={() => copyText('broll', sceneTag(scene) + ': ' + expandMentions(scene.brollPrompt || compileBrollPrompt(scene)))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
+                      <button onClick={() => copyText('broll', sceneTag(scene) + ': ' + expandLyric(expandMentions(scene.brollPrompt || compileBrollPrompt(scene)), scene))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
                         {copyFeedback === 'broll' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'broll' ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
@@ -2986,7 +3010,7 @@ export default function DDCDirectorStudio() {
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
                       <label className="text-xs font-bold text-slate-300">Lip sync prompt <span className="text-slate-500 font-normal">(close-up performance)</span></label>
-                      <button onClick={() => copyText('lipsync', sceneTag(scene) + ': ' + expandMentions(scene.lipsyncPrompt || compileLipSyncPrompt(scene)))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
+                      <button onClick={() => copyText('lipsync', sceneTag(scene) + ': ' + expandLyric(expandMentions(scene.lipsyncPrompt || compileLipSyncPrompt(scene)), scene))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
                         {copyFeedback === 'lipsync' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'lipsync' ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
@@ -2998,11 +3022,12 @@ export default function DDCDirectorStudio() {
                     {atQuery && atQuery.key === 'lipsync' && (
                       <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'lipsyncPrompt', 'prompt-lipsync-' + scene.id, 'lipsync', h)} />
                     )}
+                    <p className="text-[10px] text-slate-600">{'{{LYRIC}}'} always pulls the scene's current lyrics when you copy.</p>
                   </div>
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
                       <label className="text-xs font-bold text-slate-300">Image → video prompt <span className="text-slate-500 font-normal">(paste into Runway)</span></label>
-                      <button onClick={() => copyText('videop', sceneTag(scene) + ': ' + expandMentions(scene.videoPrompt || compileVideoPrompt(scene)))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
+                      <button onClick={() => copyText('videop', sceneTag(scene) + ': ' + expandLyric(expandMentions(scene.videoPrompt || compileVideoPrompt(scene)), scene))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
                         {copyFeedback === 'videop' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'videop' ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
@@ -3240,9 +3265,9 @@ export default function DDCDirectorStudio() {
                     : 'Upload your song in Step 1 first.'}
                 </p>
                 <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
-                  {segments.map((s) => (
-                    <div key={s.id} className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl">
-                      <div className="flex items-center space-x-2 mb-1 flex-wrap gap-y-1">
+                  {segments.map((s, i) => (
+                    <div key={s.id} className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl space-y-2">
+                      <div className="flex items-center space-x-2 flex-wrap gap-y-1">
                         <span className="text-[10px] font-black text-slate-300">{sceneTag(s)}</span>
                         <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
                         <SectionBadge title={s.title} />
@@ -3250,7 +3275,9 @@ export default function DDCDirectorStudio() {
                           <span className="text-[9px] font-bold bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-800">STILL</span>
                         )}
                       </div>
-                      <p className="text-[11px] text-slate-400 italic line-clamp-2">"{s.lyrics}"</p>
+                      {renderTimeEditor(i, s)}
+                      {renderSectionLabelEditor(i, s)}
+                      {renderLyricsEditor(i, s)}
                     </div>
                   ))}
                 </div>
@@ -3365,7 +3392,7 @@ export default function DDCDirectorStudio() {
                     <div className="flex justify-between items-center">
                       <label className="text-[10px] uppercase font-bold text-slate-400">Text-to-image prompt <span className="text-slate-600 normal-case">(Fooocus)</span></label>
                       <button
-                        onClick={() => copyText('imgp-' + s.id, sceneTag(s) + ': ' + expandMentions(s.approvedPrompt || compilePromptForScene(s)))}
+                        onClick={() => copyText('imgp-' + s.id, sceneTag(s) + ': ' + expandLyric(expandMentions(s.approvedPrompt || compilePromptForScene(s)), s))}
                         className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-emerald-400 px-2 py-1 rounded flex items-center space-x-1 transition"
                       >
                         {copyFeedback === ('imgp-' + s.id) ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
@@ -3570,7 +3597,7 @@ export default function DDCDirectorStudio() {
                     <div className="flex justify-between items-center">
                       <label className="text-[10px] uppercase font-bold text-slate-400">Production prompt <span className="text-slate-600 normal-case">(your video generator)</span></label>
                       <button
-                        onClick={() => copyText('bible-' + s.id, sceneTag(s) + ': ' + expandMentions(s.biblePrompt || compileBiblePrompt(s)))}
+                        onClick={() => copyText('bible-' + s.id, sceneTag(s) + ': ' + expandLyric(expandMentions(s.biblePrompt || compileBiblePrompt(s)), s))}
                         className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition"
                       >
                         {copyFeedback === ('bible-' + s.id) ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
@@ -3589,6 +3616,7 @@ export default function DDCDirectorStudio() {
                     {atQuery && atQuery.key === ('bible-' + s.id) && (
                       <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(i, 'biblePrompt', 'prompt-bible-' + s.id, 'bible-' + s.id, h)} />
                     )}
+                    <p className="text-[10px] text-slate-600">{'{{LYRIC}}'} always pulls the scene's current lyrics when you copy.</p>
                   </div>
                 ))}
                 {!segments.length && (
