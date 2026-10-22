@@ -462,6 +462,7 @@ function charSummary(c) {
   if (phys) bits.push(phys);
   const faceBits = [c.faceShape ? `${c.faceShape} face` : '', c.marks].filter(Boolean).join(', ');
   if (faceBits) bits.push(faceBits);
+  if (c.eyes) bits.push(`eyes: ${c.eyes}`);
   if (c.hair) bits.push(`hair: ${c.hair}`);
   if (c.headwear) bits.push(`headwear: ${c.headwear}`);
   const wear = [c.wardrobe, c.accessories].filter(Boolean).join(' + ');
@@ -494,6 +495,7 @@ const CHAR_DETAIL_FIELDS = [
   ['build', 'Build / size'],
   ['faceShape', 'Face shape'],
   ['marks', 'Facial features — freckles, scars, tattoos, piercings'],
+  ['eyes', 'Eyes — color / shape'],
   ['hair', 'Hair'],
   ['headwear', 'Headwear — hats etc.'],
   ['mood', 'Mood / expression'],
@@ -501,7 +503,7 @@ const CHAR_DETAIL_FIELDS = [
   ['wardrobe', 'Wardrobe'],
   ['accessories', 'Accessories'],
 ];
-const CHAR_ALL_FIELDS = ['age', 'gender', 'skinTone', 'build', 'faceShape', 'marks', 'hair', 'headwear', 'mood', 'artStyle', 'wardrobe', 'accessories', 'notes'];
+const CHAR_ALL_FIELDS = ['age', 'gender', 'skinTone', 'build', 'faceShape', 'marks', 'eyes', 'hair', 'headwear', 'mood', 'artStyle', 'wardrobe', 'accessories', 'notes'];
 /* Story roles — Lindsey's key: 🌟 Lead, ❤️ Co-lead, 💜 Confidant, 💙 Mentor,
    💛 Light, 🩷 Muse, 💔 Tragic figure, 💀 Antagonist.
    `role` lives on the character (library + cast so it carries into future
@@ -518,7 +520,7 @@ const CHARACTER_ROLES = [
 ];
 function roleDef(id) { return CHARACTER_ROLES.find(r => r.id === id) || null; }
 /* Fields that exist ONLY in the new shape ('hair' is shared with the legacy blob). */
-const MODERN_KEYS = ['age', 'gender', 'skinTone', 'build', 'faceShape', 'marks', 'headwear', 'mood', 'artStyle', 'wardrobe', 'accessories', 'notes'];
+const MODERN_KEYS = ['age', 'gender', 'skinTone', 'build', 'faceShape', 'marks', 'eyes', 'headwear', 'mood', 'artStyle', 'wardrobe', 'accessories', 'notes'];
 function pickCharFields(src) {
   const o = {};
   CHAR_ALL_FIELDS.forEach(k => { o[k] = src[k] || ''; });
@@ -683,18 +685,16 @@ function defaultEnergy(title) {
   return 5;
 }
 
-/* Director wizard steps: 1 Audio -> 2 Intervals -> 3 Sections -> 4 Theme ->
-   5 Image prompts -> 6 Upload images -> 7 Storyboard review -> 8 Bible -> 9 Finished */
+/* Director wizard steps (simplified 2026-10-21, Lindsey's spec):
+   1 Audio -> 2 Scenes -> 3 Theme -> 4 Images to Create -> 5 Bible (storyboard) -> 6 Videos.
+   Per scene: ONE image prompt (step 4) and ONE video prompt (step 5). Nothing else. */
 const DIRECTOR_STEPS = [
   { key: 'audio', label: 'Audio' },
-  { key: 'intervals', label: 'Intervals' },
-  { key: 'sections', label: 'Sections' },
+  { key: 'scenes', label: 'Scenes' },
   { key: 'theme', label: 'Theme' },
-  { key: 'imgprompts', label: 'Img prompts' },
-  { key: 'upload', label: 'Upload' },
-  { key: 'storyboard', label: 'Storyboard' },
+  { key: 'images', label: 'Images' },
   { key: 'bible', label: 'Bible' },
-  { key: 'finished', label: 'Finished' },
+  { key: 'videos', label: 'Videos' },
 ];
 
 /* ============================== MAIN COMPONENT ============================== */
@@ -1690,7 +1690,7 @@ export default function DDCDirectorStudio() {
   // "Character 1 (@odette) [refs 1A, 1C]" — which cast members a scene's prompts
   // mention, with their filled reference-photo slot letters, for the Bible export.
   const sceneCharacterLine = (scene) => {
-    const text = [scene.approvedPrompt, scene.biblePrompt, scene.brollPrompt, scene.lipsyncPrompt, scene.videoPrompt]
+    const text = [scene.approvedPrompt, scene.videoPrompt]
       .filter(Boolean).join(' ');
     const seen = new Set();
     const seenIds = new Set();
@@ -1785,17 +1785,19 @@ export default function DDCDirectorStudio() {
   };
 
   /* ------------------------- prompt compilers ------------------------- */
-  /* Text-to-image keyframe prompt (Fooocus), built on Lindsey's template:
+  /* Text-to-image prompt (Fooocus), Lindsey's template, simplified 2026-10-21:
      header → per-character SUBJECT / POSE & ACTION → SCENE → ENVIRONMENT →
-     CAMERA → LIGHTING → COLOR & MOOD → STYLE & QUALITY → CONSISTENCY → AVOID →
-     VIDEO PREPARATION. Fully self-contained: full written character descriptions,
-     no @handles, no tokens. */
+     CAMERA → LIGHTING → COLOR & MOOD → STYLE & QUALITY → CONSISTENCY → AVOID.
+     Characters are NAMED only (name + role) — Lindsey already has their reference
+     images, so no appearance descriptions per scene. No VIDEO PREPARATION block:
+     motion lives only in the scene's one video prompt (compileVideoPrompt). */
   const fullAppearance = (c) => [
     [c.age, c.gender].filter(Boolean).join(' '),
     c.skinTone,
     c.build,
     c.faceShape ? `${c.faceShape} face` : '',
     c.marks,
+    c.eyes ? `${c.eyes} eyes` : '',
     c.hair ? `${c.hair} hair` : '',
     c.headwear,
     c.wardrobe ? `wearing ${c.wardrobe}` : '',
@@ -1808,85 +1810,80 @@ export default function DDCDirectorStudio() {
     const expr = c.mood ? ` Expression: ${c.mood}.` : '';
     return `${action}.${expr}`;
   };
+  /* Helpers for Lindsey's simple prompt format (2026-10-21): a scene's people
+     are just "Woman" / "Man" (from each character's gender) — their reference
+     images carry the look, so prompts never describe appearance. A scene with
+     no action (or a B-roll/background shot type) is background-only. */
+  const genderWord = (c) => {
+    const g = ((c && c.gender) || '').toLowerCase();
+    if (g.includes('female') || g.includes('woman') || g === 'f') return 'Woman';
+    if (g.includes('male') || g.includes('man') || g === 'm') return 'Man';
+    return (c && c.name) || 'Woman';
+  };
+  const isBackgroundOnly = (scene) => /b-?roll|background/i.test(scene.shotType || '') || !((scene.characterAction || '').trim());
+  const subjectWords = (scene) => {
+    const words = [];
+    scenePeople(scene).forEach((c) => { const w = genderWord(c); if (!words.includes(w)) words.push(w); });
+    return words.join(' and ');
+  };
+  const lcAction = (scene) => {
+    const a = (scene.characterAction || 'performs at center frame').trim().replace(/\.$/, '');
+    return a.charAt(0).toLowerCase() + a.slice(1);
+  };
+
+  /* ONE image prompt per scene — Lindsey's simple format (2026-10-21):
+     "[Woman/Man] doing [action] in [background]" — or just the background —
+     plus lighting, colors, camera, and style. Scene # and time ride in the
+     card header / copy header, not in the prompt body. */
   const compilePromptForScene = (scene) => {
-    const people = scenePeople(scene);
-    const n = people.length;
-    const charSections = people.map((c, i) => {
-      const rd = c.role ? roleDef(c.role) : null;
-      const tag = n > 1 ? ` (Character ${cast.findIndex(x => x.id === c.id) + 1})` : '';
-      const subj = `SUBJECT${tag}: ${c.name}${rd ? `, ${rd.label}` : ''} — ${fullAppearance(c)}`;
-      const pose = `POSE & ACTION${tag}: ${charPoseAction(c, i, scene)}`;
-      return `${subj}\n${pose}`;
-    }).join('\n\n');
-    const lyricLine = (scene.lyrics || '').trim();
-    const fgDefault = people.map((c) => {
-      const ci = cast.findIndex(x => x.id === c.id) + 1;
-      const rd = c.role ? roleDef(c.role) : null;
-      return `Character ${ci} (${c.name}${rd ? `, ${rd.label}` : ''})`;
-    }).join(' and ');
-    const energy = scene.energyLevel || 5;
-    const intensity = energy >= 7 ? 'high intensity, dynamic motion' : energy >= 4 ? 'moderate motion' : 'slow, lingering motion';
-    const lines = [
-      `Create a ${lockedStyle.descriptor} image in 9:16.`,
-      '',
-      charSections,
-      '',
-      `SCENE: ${scene.setting || lockedTheme.notes}${lyricLine ? ` — mood of the lyric: "${lyricLine}"` : ''}.`,
-      `ENVIRONMENT: Foreground: ${scene.envFG || fgDefault + ' in the foreground'}. Midground: ${scene.envMG || '—'}. Background: ${scene.envBG || (scene.setting || lockedTheme.notes)}. Props and details: ${scene.envProps || '—'}.`,
-      `CAMERA: ${scene.shotType || 'Motion clip'} shot, ${scene.cameraAngle} angle, ${scene.cameraMovement} perspective, vertical 9:16 framing, cinematic lens, sharp focus on the subjects with soft depth of field.`,
-      `LIGHTING: ${scene.lightingMood}; soft directional source, gentle shadows, luminous highlights.`,
-      `COLOR & MOOD: palette ${lockedPalette.hexes.join(', ')}${lockedPalette.mood ? `, ${lockedPalette.mood}` : ''}${lyricLine ? `; emotional tone of "${lyricLine}"` : ''}.`,
-      `STYLE & QUALITY: ${lockedStyle.descriptor}, photorealistic, ultra-detailed skin and fabric textures, polished cinematic finish.`,
-      `CONSISTENCY: keep every character's face, wardrobe, and identifying features identical across all keyframes of this video.`,
-      `AVOID: text, watermarks, logos, extra limbs, deformed hands, blurry faces.`,
-      `VIDEO PREPARATION: Character movement / action: ${scene.characterAction || 'performing at center frame'}. Facial expression changes: ${scene.lipSyncEnabled ? (lyricLine ? `lips move in sync with the lyric "${lyricLine}"` : 'lips move as if singing') : 'subtle expression shifts matching the mood'}. Camera movement (${scene.cameraMovement}). Background / environmental movement: subtle ambient drift. Motion speed / intensity: ${intensity}. Scene duration: ${(scene.duration || 0).toFixed(1)}s. Details that must remain unchanged: faces, wardrobe, identities.`,
-    ];
+    const bg = scene.envBG || scene.setting || lockedTheme.notes;
+    const lines = [];
+    if (isBackgroundOnly(scene)) {
+      lines.push(`Just background: ${bg}.`);
+    } else {
+      lines.push(`${subjectWords(scene)} ${lcAction(scene)} in ${bg}.`);
+      lines.push(`Use their reference images for their exact looks — do not redesign them.`);
+    }
+    const layers = [
+      scene.envFG ? `Foreground: ${scene.envFG}` : '',
+      scene.envMG ? `Midground: ${scene.envMG}` : '',
+      scene.envProps ? `Props: ${scene.envProps}` : '',
+    ].filter(Boolean).join('. ');
+    if (layers) lines.push(layers + '.');
+    lines.push(`Lighting: ${scene.lightingMood}.`);
+    lines.push(`Colors: ${lockedPalette.hexes.join(', ')}${lockedPalette.mood ? ` — ${lockedPalette.mood}` : ''}.`);
+    lines.push(`Camera: ${scene.cameraAngle}, ${scene.cameraMovement}, 9:16 vertical.`);
+    lines.push(`Style: ${lockedStyle.descriptor}, photorealistic, cinematic, ultra-detailed. No text, no watermarks.`);
     return lines.join('\n');
   };
-  const compileBrollPrompt = (scene) => {
-    return `B-roll cutaway, cinematic music video, ${lockedStyle.descriptor}. No lip sync — pure atmosphere and texture. Setting: ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}. Camera: ${scene.cameraAngle}, slow ${scene.cameraMovement.toLowerCase()}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, 9:16 vertical.`;
-  };
-  /* Generator-clean character label + per-role motion beats for image-to-video prompts.
-     Video models can't use @handles or emojis — they get "Character 1 (Lead)". */
-  const genCharLabel = (c) => {
-    const n = cast.findIndex(x => x.id === c.id) + 1;
-    const rd = c.role ? roleDef(c.role) : null;
-    return `Character ${n < 1 ? '?' : n}${rd ? ` (${rd.label})` : ''}`;
-  };
-  const ROLE_BEATS = {
-    colead: 'moves in sync with the lead, close beside them',
-    confidant: 'stays near the lead, reacting with quiet intensity',
-    mentor: 'observes with calm authority, gesturing guidance',
-    light: 'moves playfully at the edge of frame, bringing levity',
-    muse: 'drifts almost still, ethereal, drawing the eye',
-    tragic: 'withdraws slowly, shoulders falling, lost in the moment',
-    antagonist: 'advances with menacing intent, eyes locked on the lead',
-  };
-  const compileLipSyncPrompt = (scene) => {
-    const people = scenePeople(scene);
-    const singer = people.find(c => c.id === lockedChar.id) || people[0];
-    const others = people.filter(c => c !== singer)
-      .map(c => `${genCharLabel(c)} ${ROLE_BEATS[c.role] || 'is present in frame'}`).join('; ');
-    return `Image-to-video lip sync shot, 9:16 vertical. Extreme close-up: ${genCharLabel(singer)} sings directly into the lens, mouth and lip movements visibly matching the lyric "{{LYRIC}}", emotive and locked on camera.${others ? ` ${others}.` : ''} Preserve the exact face, wardrobe, and identity from the input image — no face change, no outfit change. Camera: intimate close-up, subtle slow dolly in. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Photorealistic, shallow depth of field.`;
-  };
+  /* ONE video prompt per scene (image-to-video), Lindsey's labeled format
+     (simplified 2026-10-21). Merges the old video / Bible / lip-sync / B-roll
+     prompts into this single one: lip sync, when on for the scene, is a line
+     inside it — never a separate prompt. Characters are named by clean label
+     only (Character 1 (Lead)) — their reference/input image carries the look. */
+  /* ONE video prompt per scene — Lindsey's simple format (2026-10-21):
+     "[Woman/Man] in this image doing [action] in [background]", then EITHER
+     a lip sync line with the lyric OR a B-roll line — never both, never
+     separate prompts. */
   const compileVideoPrompt = (scene) => {
-    const people = scenePeople(scene);
-    const beats = people.map((c, i) => {
-      const action = (i === 0 ? (scene.characterAction || 'performs at center frame') : (ROLE_BEATS[c.role] || 'is present in frame, true to the scene'));
-      return `${genCharLabel(c)}: ${action}`;
-    }).join(' ');
-    return `Image-to-video prompt, 9:16 vertical. Preserve the exact faces, wardrobe, and identities from the input image — do not change faces or outfits. ${beats} Camera: ${scene.cameraMovement}, ${scene.cameraAngle}. Setting: ${scene.setting || lockedTheme.notes}. Lighting: ${scene.lightingMood}. Colors: [${lockedPalette.hexes.join(', ')}]. Mood of the lyric "{{LYRIC}}". Photorealistic cinematic motion.`;
-  };
-  // Full DIY production prompt for the Bible: paste into Runway / Kling yourself.
-  const compileBiblePrompt = (scene) => {
-    const sceneLine = `Scene (${scene.title}): ${scene.setting || lockedTheme.notes}. Action: ${scene.characterAction}.`;
-    const camLine = `Camera angle: ${scene.cameraAngle}. Camera movement: ${scene.cameraMovement}.`;
-    const lookLine = `Lighting and mood: ${scene.lightingMood}. Palette: [${lockedPalette.hexes.join(', ')}]. Style: ${lockedStyle.descriptor}.`;
-    const syncLine = scene.lipSyncEnabled
-      ? ` LIP SYNC DIRECTIONS: extreme close-up on the character's face, singing directly into the lens for the full shot — mouth and lip movements must visibly match the lyric being sung: "{{LYRIC}}". Keep the face centered, sharp, and in focus the entire time; subtle slow dolly-in, no cuts away from the face.`
-      : '';
-    const diyLine = ` Wardrobe continuity: same wardrobe (${lockedChar.wardrobe || lockedChar.outfit || 'signature outfit'}) in every shot; keep the character's face identical across all scenes. Vertical 9:16, photorealistic cinematic music video. Lyric for this shot: "{{LYRIC}}".`;
-    return `${sceneLine} ${camLine} ${lookLine}${syncLine}${diyLine}`;
+    const bg = scene.envBG || scene.setting || lockedTheme.notes;
+    const lines = [];
+    if (isBackgroundOnly(scene)) {
+      lines.push(`This image: ${bg} — background only, no people.`);
+      lines.push(`B-roll: no lip sync — the background comes alive with subtle motion, atmosphere and texture only.`);
+    } else {
+      const subj = subjectWords(scene);
+      const verb = subj.includes(' and ') ? 'are' : 'is';
+      lines.push(`${subj} in this image ${verb} ${lcAction(scene)} in ${bg}.`);
+      if (scene.lipSyncEnabled) {
+        lines.push(`Lip sync: "{{LYRIC}}" — sings this lyric to camera, mouth and lips clearly matching the words, face centered and sharp the whole shot.`);
+      } else {
+        lines.push(`B-roll: no lip sync — pure motion and atmosphere, true to the scene.`);
+      }
+    }
+    lines.push(`Camera movement: ${scene.cameraMovement}, ${scene.cameraAngle}. Duration: ${(scene.duration || 0).toFixed(1)}s.`);
+    lines.push(`Keep the faces, outfits, and background exactly as in the image — no new characters, no text, no watermarks.`);
+    return lines.join('\n');
   };
 
   /* ------------------------- @mention engine ------------------------- */
@@ -2259,7 +2256,6 @@ export default function DDCDirectorStudio() {
     const ordered = cast.map(c => c.id).filter(id => ids.includes(id));
     const patch = { castIds: ordered };
     if (typeof s.videoPrompt === 'string' && s.videoPrompt && s.videoPrompt === compileVideoPrompt(s)) patch.videoPrompt = '';
-    if (typeof s.lipsyncPrompt === 'string' && s.lipsyncPrompt && s.lipsyncPrompt === compileLipSyncPrompt(s)) patch.lipsyncPrompt = '';
     updateScene(index, patch);
   };
 
@@ -2656,7 +2652,7 @@ export default function DDCDirectorStudio() {
             // for the self-updating {{LYRIC}} token. Prompts she hand-customized
             // (no verbatim match) are left untouched — her words always win.
             const patch = { lyrics: newLyric, lyricsLocked: true };
-            ['lipsyncPrompt', 'videoPrompt', 'brollPrompt', 'biblePrompt', 'approvedPrompt'].forEach((f) => {
+            ['videoPrompt', 'approvedPrompt'].forEach((f) => {
               if (typeof s[f] === 'string' && s[f].includes(oldLyric)) {
                 patch[f] = s[f].split(oldLyric).join('{{LYRIC}}');
               }
@@ -2717,7 +2713,8 @@ export default function DDCDirectorStudio() {
     );
   };
 
-  /* ------------------------- Director: Bible copy-all ------------------------- */
+  /* ------------------- Director: Bible (storyboard) copy-all -------------------
+     One VIDEO prompt per scene, paired with its image. */
   const copyAllBible = () => {
     const text = segments.map(s => {
       const charsLine = sceneCharacterLine(s);
@@ -2726,7 +2723,7 @@ export default function DDCDirectorStudio() {
         (charsLine ? charsLine + '\n' : '') +
         `Lyrics: ${s.lyrics}\n` +
         `Image: ${s.imageName || (s.keyframeImageUrl ? 'uploaded still' : '(no image uploaded yet)')}\n` +
-        `Production prompt: ${sceneTag(s)}: ${expandLyric(expandMentions(s.biblePrompt || compileBiblePrompt(s)), s)}`
+        `Video prompt: ${sceneTag(s)}: ${expandLyric(expandMentions(s.videoPrompt || compileVideoPrompt(s)), s)}`
       );
     }).join('\n\n---\n\n');
     copyText('bible-all', text || 'No scenes yet.');
@@ -2997,9 +2994,8 @@ export default function DDCDirectorStudio() {
     if (step <= 1) return true;
     if (step === 2) return !!audio;
     if (step === 3) return segments.length > 0;
-    if (step === 4) return segments.length > 0;
-    if (step === 9) return segments.length > 0 && !!audio;
-    return hasTheme; // steps 5-8
+    if (step === 6) return segments.length > 0 && !!audio;
+    return hasTheme; // steps 4-5: Images to Create, Bible
   };
   const maxDirectorStep = DIRECTOR_STEPS.map((_, i) => i + 1).filter(directorUnlocked).length;
   const shownDirectorStep = Math.min(directorStep, Math.max(1, maxDirectorStep));
@@ -3453,54 +3449,35 @@ export default function DDCDirectorStudio() {
                   )}
                 </div>
 
-                {/* Scene prompts: B-roll / lip sync / image-to-video */}
+                {/* Scene prompts: ONE image prompt + ONE video prompt (2026-10-21) */}
                 <div className="space-y-4">
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
-                      <label className="text-xs font-bold text-slate-300">B-roll prompt <span className="text-slate-500 font-normal">(atmosphere cutaway)</span></label>
-                      <button onClick={() => copyText('broll', sceneTag(scene) + ': ' + expandLyric(expandMentions(scene.brollPrompt || compileBrollPrompt(scene)), scene))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
-                        {copyFeedback === 'broll' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'broll' ? 'Copied' : 'Copy'}</span>
+                      <label className="text-xs font-bold text-slate-300">Image prompt <span className="text-slate-500 font-normal">(one per scene — for Fooocus)</span></label>
+                      <button onClick={() => copyText('imgp-scene', sceneTag(scene) + ' \u00b7 ' + fmtClock(scene.startTime) + '\u2013' + fmtClock(scene.endTime) + '\n' + expandLyric(expandMentions(scene.approvedPrompt || compilePromptForScene(scene)), scene))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-emerald-400 px-2 py-1 rounded flex items-center space-x-1 transition">
+                        {copyFeedback === 'imgp-scene' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'imgp-scene' ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
-                    <MentionBar {...mentionBarProps} onPick={(h) => insertMention(selectedSceneIndex, 'brollPrompt', 'prompt-broll-' + scene.id, scene.brollPrompt || compileBrollPrompt(scene), h)} />
-                    <textarea id={'prompt-broll-' + scene.id} rows={3} value={scene.brollPrompt || compileBrollPrompt(scene)}
-                      onChange={(e) => { updateScene(selectedSceneIndex, { brollPrompt: e.target.value }); detectAt(e, 'broll'); }}
-                      onKeyUp={(e) => detectAt(e, 'broll')}
-                      onSelect={(e) => trackCaret('prompt-broll-' + scene.id, e)}
-                      onBlur={(e) => trackCaret('prompt-broll-' + scene.id, e)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500" />
-                    {atQuery && atQuery.key === 'broll' && (
-                      <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'brollPrompt', 'prompt-broll-' + scene.id, 'broll', h)} />
+                    <MentionBar {...mentionBarProps} onPick={(h) => insertMention(selectedSceneIndex, 'approvedPrompt', 'prompt-imgscene-' + scene.id, scene.approvedPrompt || compilePromptForScene(scene), h)} />
+                    <textarea id={'prompt-imgscene-' + scene.id} rows={5} value={scene.approvedPrompt || compilePromptForScene(scene)}
+                      onChange={(e) => { updateScene(selectedSceneIndex, { approvedPrompt: e.target.value }); detectAt(e, 'imgp-scene'); }}
+                      onKeyUp={(e) => detectAt(e, 'imgp-scene')}
+                      onSelect={(e) => trackCaret('prompt-imgscene-' + scene.id, e)}
+                      onBlur={(e) => trackCaret('prompt-imgscene-' + scene.id, e)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-emerald-500" />
+                    {atQuery && atQuery.key === 'imgp-scene' && (
+                      <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'approvedPrompt', 'prompt-imgscene-' + scene.id, 'imgp-scene', h)} />
                     )}
                   </div>
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
-                      <label className="text-xs font-bold text-slate-300">Lip sync prompt <span className="text-slate-500 font-normal">(close-up performance)</span></label>
-                      <button onClick={() => copyText('lipsync', sceneTag(scene) + ': ' + expandLyric(expandMentions(scene.lipsyncPrompt || compileLipSyncPrompt(scene)), scene))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
-                        {copyFeedback === 'lipsync' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'lipsync' ? 'Copied' : 'Copy'}</span>
-                      </button>
-                    </div>
-                    <MentionBar {...mentionBarProps} onPick={(h) => insertMention(selectedSceneIndex, 'lipsyncPrompt', 'prompt-lipsync-' + scene.id, scene.lipsyncPrompt || compileLipSyncPrompt(scene), h)} />
-                    <textarea id={'prompt-lipsync-' + scene.id} rows={3} value={scene.lipsyncPrompt || compileLipSyncPrompt(scene)}
-                      onChange={(e) => { updateScene(selectedSceneIndex, { lipsyncPrompt: e.target.value }); detectAt(e, 'lipsync'); }}
-                      onKeyUp={(e) => detectAt(e, 'lipsync')}
-                      onSelect={(e) => trackCaret('prompt-lipsync-' + scene.id, e)}
-                      onBlur={(e) => trackCaret('prompt-lipsync-' + scene.id, e)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-cyan-500" />
-                    {atQuery && atQuery.key === 'lipsync' && (
-                      <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'lipsyncPrompt', 'prompt-lipsync-' + scene.id, 'lipsync', h)} />
-                    )}
-                    <p className="text-[10px] text-slate-600">{'{{LYRIC}}'} always pulls the scene's current lyrics when you copy.</p>
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-center">
-                      <label className="text-xs font-bold text-slate-300">Image → video prompt <span className="text-slate-500 font-normal">(paste into Runway)</span></label>
-                      <button onClick={() => copyText('videop', sceneTag(scene) + ': ' + expandLyric(expandMentions(scene.videoPrompt || compileVideoPrompt(scene)), scene))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
+                      <label className="text-xs font-bold text-slate-300">Video prompt <span className="text-slate-500 font-normal">(one per scene — lip sync or B-roll, inside this prompt)</span></label>
+                      <button onClick={() => copyText('videop', sceneTag(scene) + ' \u00b7 ' + fmtClock(scene.startTime) + '\u2013' + fmtClock(scene.endTime) + '\n' + expandLyric(expandMentions(scene.videoPrompt || compileVideoPrompt(scene)), scene))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition">
                         {copyFeedback === 'videop' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'videop' ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
                     <MentionBar {...mentionBarProps} onPick={(h) => insertMention(selectedSceneIndex, 'videoPrompt', 'prompt-video-' + scene.id, scene.videoPrompt || compileVideoPrompt(scene), h)} />
-                    <textarea id={'prompt-video-' + scene.id} rows={3} value={scene.videoPrompt || compileVideoPrompt(scene)}
+                    <textarea id={'prompt-video-' + scene.id} rows={5} value={scene.videoPrompt || compileVideoPrompt(scene)}
                       onChange={(e) => { updateScene(selectedSceneIndex, { videoPrompt: e.target.value }); detectAt(e, 'videop'); }}
                       onKeyUp={(e) => detectAt(e, 'videop')}
                       onSelect={(e) => trackCaret('prompt-video-' + scene.id, e)}
@@ -3509,6 +3486,7 @@ export default function DDCDirectorStudio() {
                     {atQuery && atQuery.key === 'videop' && (
                       <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(selectedSceneIndex, 'videoPrompt', 'prompt-video-' + scene.id, 'videop', h)} />
                     )}
+                    <p className="text-[10px] text-slate-600">{'{{LYRIC}}'} always pulls the scene's current lyrics when you copy.</p>
                   </div>
                 </div>
 
@@ -3686,7 +3664,7 @@ export default function DDCDirectorStudio() {
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-fuchsia-500"
                   />
                 </div>
-                <DirectorContinue next={2}>Continue to intervals</DirectorContinue>
+                <DirectorContinue next={2}>Continue to scenes</DirectorContinue>
               </div>
             )}
 
@@ -3694,7 +3672,7 @@ export default function DDCDirectorStudio() {
             {shownDirectorStep === 2 && (
               <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-4 shadow-lg">
                 <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-                  <Clock className="w-4 h-4 text-cyan-400" /><span>Step 2 — Timestamped intervals</span>
+                  <Clock className="w-4 h-4 text-cyan-400" /><span>Step 2 — Scenes (times + sections)</span>
                 </h2>
                 <div className="flex flex-wrap items-center gap-2">
                   {[10, 15, 20, 30].map((sec) => (
@@ -3754,50 +3732,15 @@ export default function DDCDirectorStudio() {
                   ))}
                 </div>
                 {renderAddSceneButton()}
-                <DirectorContinue next={3}>Continue to sections</DirectorContinue>
+                <DirectorContinue next={3}>Continue to theme</DirectorContinue>
               </div>
             )}
 
-            {/* STEP 3 — Section labels */}
+            {/* STEP 3 — Theme + storyline */}
             {shownDirectorStep === 3 && (
               <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-4 shadow-lg">
                 <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-                  <Sliders className="w-4 h-4 text-cyan-400" /><span>Step 3 — Section labels</span>
-                </h2>
-                <p className="text-[10px] text-slate-500">
-                  The auto-guess is just a starting point — set each interval to the real part of the song. Split verses get their own labels (Verse 1a, Verse 1b…).
-                </p>
-                <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
-                  {segments.map((s, i) => (
-                    <div key={s.id} className="p-3 bg-slate-950/60 border border-slate-800 rounded-xl space-y-2">
-                      <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-                        <span className="text-[10px] font-black text-slate-300">{sceneTag(s)}</span>
-                        <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
-                        <SectionBadge title={s.title} />
-                        <div className="ml-auto">{renderSceneRowActions(i)}</div>
-                      </div>
-                      {renderTimeEditor(i, s)}
-                      {renderSectionLabelEditor(i, s)}
-                      {renderLyricsEditor(i, s)}
-                      {renderSceneCastChips(i, s)}
-                    </div>
-                  ))}
-                </div>
-                {renderAddSceneButton()}
-                {!segments.length && (
-                  <p className="text-xs text-slate-500 bg-slate-900/60 border border-slate-800 rounded-xl p-4 text-center">
-                    No scenes yet — start at Step 1 with your song.
-                  </p>
-                )}
-                <DirectorContinue next={4}>Continue to theme</DirectorContinue>
-              </div>
-            )}
-
-            {/* STEP 4 — Theme + storyline */}
-            {shownDirectorStep === 4 && (
-              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-4 shadow-lg">
-                <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-                  <Sparkles className="w-4 h-4 text-amber-400" /><span>Step 4 — Theme + storyline</span>
+                  <Sparkles className="w-4 h-4 text-amber-400" /><span>Step 3 — Theme + storyline</span>
                 </h2>
                 <div className="grid grid-cols-2 gap-2">
                 <button
@@ -3844,19 +3787,19 @@ export default function DDCDirectorStudio() {
                   />
                 </div>
                 <p className="text-[10px] text-slate-500">AI-drafted, free via Pollinations — rewrite anything. This guides every prompt and the Bible.</p>
-                <DirectorContinue next={5}>Continue to image prompts</DirectorContinue>
+                <DirectorContinue next={4}>Continue to Images to Create</DirectorContinue>
               </div>
             )}
 
-            {/* STEP 5 — Image prompts (prompt-only: copy into Fooocus) */}
-            {shownDirectorStep === 5 && (
+            {/* STEP 4 — Image prompts (prompt-only: copy into Fooocus) */}
+            {shownDirectorStep === 4 && (
               <div className="space-y-4">
                 <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg flex items-center justify-between flex-wrap gap-3">
                   <div>
                     <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-                      <Sparkles className="w-4 h-4 text-emerald-400" /><span>Step 5 — Image prompts</span>
+                      <Sparkles className="w-4 h-4 text-emerald-400" /><span>Step 4 — Images to Create</span>
                     </h2>
-                    <p className="text-[10px] text-slate-500 mt-1">One text-to-image prompt per scene. Copy them all, paste into your Fooocus notebook, generate.</p>
+                    <p className="text-[10px] text-slate-500 mt-1">One image prompt per scene — that's it. Copy it, make the image in Fooocus, then upload it right here in the same card.</p>
                   </div>
                   <button
                     onClick={copyAllImagePrompts}
@@ -3878,6 +3821,32 @@ export default function DDCDirectorStudio() {
                       )}
                     </div>
                     <p className="text-[11px] text-slate-400 italic">"{s.lyrics}"</p>
+                                        <div className="flex items-center gap-3 bg-slate-950/60 border border-slate-800 rounded-xl p-2.5">
+                      <div className="w-14 flex-shrink-0">
+                        {s.keyframeImageUrl ? (
+                          <img src={s.keyframeImageUrl} alt={'Scene ' + s.sceneNumber} className="w-full aspect-[9/16] object-cover rounded-lg border border-emerald-700" />
+                        ) : (
+                          <div className="w-full aspect-[9/16] rounded-lg border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
+                            <span className="text-[8px] text-slate-600 text-center px-1">No image yet</span>
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[10px] font-bold text-slate-300">{s.keyframeImageUrl ? '\u2713 Image made \u2014 uploaded' : 'Image still to create'}</p>
+                        {s.imageName ? <p className="text-[10px] text-slate-500 truncate">{s.imageName}</p> : null}
+                        <div className="flex gap-2 mt-1.5">
+                          <label className="cursor-pointer text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1.5 rounded-lg flex items-center space-x-1 transition">
+                            <Upload className="w-3 h-3" /><span>{s.keyframeImageUrl ? 'Replace' : 'Upload image'}</span>
+                            <input type="file" accept="image/*" className="hidden" onChange={(e) => { handleSceneImageUpload(i, e.target.files && e.target.files[0]); e.target.value = ''; }} />
+                          </label>
+                          {s.keyframeImageUrl && (
+                            <button onClick={() => removeSceneImage(i)} className="text-[10px] text-slate-400 hover:text-red-400 flex items-center space-x-1">
+                              <Trash2 className="w-3 h-3" /><span>Remove</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
                     {renderSceneCastChips(i, s)}
                     <details className="bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2">
                       <summary className="text-[10px] font-bold text-slate-400 cursor-pointer select-none">Environment layers <span className="text-slate-600 font-normal">— foreground / midground / background / props</span></summary>
@@ -3897,7 +3866,7 @@ export default function DDCDirectorStudio() {
                       </div>
                     </details>
                     <div className="flex justify-between items-center">
-                      <label className="text-[10px] uppercase font-bold text-slate-400">Text-to-image prompt <span className="text-slate-600 normal-case">(Fooocus)</span></label>
+                      <label className="text-[10px] uppercase font-bold text-slate-400">Image prompt <span className="text-slate-600 normal-case">(one per scene \u2014 Fooocus)</span></label>
                       <button
                         onClick={() => copyText('imgp-' + s.id, sceneTag(s) + ': ' + expandLyric(expandMentions(s.approvedPrompt || compilePromptForScene(s)), s))}
                         className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-emerald-400 px-2 py-1 rounded flex items-center space-x-1 transition"
@@ -3927,153 +3896,19 @@ export default function DDCDirectorStudio() {
                     No scenes yet — start at Step 1 with your song.
                   </p>
                 )}
-                <DirectorContinue next={6}>Continue to upload</DirectorContinue>
+                <DirectorContinue next={5}>Continue to the Bible</DirectorContinue>
               </div>
             )}
 
-            {/* STEP 6 — Upload your images */}
-            {shownDirectorStep === 6 && (
-              <div className="space-y-4">
-                <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg">
-                  <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-                    <Upload className="w-4 h-4 text-cyan-400" /><span>Step 6 — Upload your images</span>
-                  </h2>
-                  <p className="text-[10px] text-slate-500 mt-1">Drop in your Fooocus results — one image per scene. They save in the app, so they survive reloads.</p>
-                </div>
-                {segments.map((s, i) => (
-                  <div key={s.id} className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3 flex items-center gap-3">
-                    <div className="w-20 flex-shrink-0">
-                      {s.keyframeImageUrl ? (
-                        <img src={s.keyframeImageUrl} alt={'Scene ' + s.sceneNumber} className="w-full aspect-[9/16] object-cover rounded-lg border border-slate-700" />
-                      ) : (
-                        <div className="w-full aspect-[9/16] rounded-lg border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
-                          <span className="text-[9px] text-slate-600 text-center px-2">No image yet</span>
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-                        <span className="text-[10px] font-black text-slate-300">{sceneTag(s)}</span>
-                        <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
-                        <SectionBadge title={s.title} />
-                      </div>
-                      {s.imageName ? <p className="text-[10px] text-slate-500 mt-1 truncate">{s.imageName}</p> : null}
-                      <div className="flex gap-2 mt-2">
-                        <label className="cursor-pointer text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1.5 rounded-lg flex items-center space-x-1 transition">
-                          <Upload className="w-3 h-3" /><span>{s.keyframeImageUrl ? 'Replace' : 'Upload image'}</span>
-                          <input type="file" accept="image/*" className="hidden" onChange={(e) => { handleSceneImageUpload(i, e.target.files && e.target.files[0]); e.target.value = ''; }} />
-                        </label>
-                        {s.keyframeImageUrl && (
-                          <button onClick={() => removeSceneImage(i)} className="text-[10px] text-slate-400 hover:text-red-400 flex items-center space-x-1">
-                            <Trash2 className="w-3 h-3" /><span>Remove</span>
-                          </button>
-                        )}
-                      </div>
-                      {renderSceneCastChips(i, s)}
-                    </div>
-                  </div>
-                ))}
-                {!segments.length && (
-                  <p className="text-xs text-slate-500 bg-slate-900/60 border border-slate-800 rounded-xl p-4 text-center">
-                    No scenes yet — start at Step 1 with your song.
-                  </p>
-                )}
-                <DirectorContinue next={7}>Continue to storyboard</DirectorContinue>
-              </div>
-            )}
-
-            {/* STEP 7 — Storyboard review */}
-            {shownDirectorStep === 7 && (
-              <div className="space-y-4">
-                <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg">
-                  <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-                    <Film className="w-4 h-4 text-emerald-400" /><span>Step 7 — Storyboard review</span>
-                  </h2>
-                  <p className="text-[10px] text-slate-500 mt-1">See what each scene will look like. Approve it, veto it, or edit the video concept — your call on every scene.</p>
-                </div>
-                {segments.map((s, i) => {
-                  const status = s.reviewStatus || 'pending';
-                  return (
-                    <div key={s.id} className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg">
-                      <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-                        <span className="text-[10px] font-black text-slate-300">{sceneTag(s)}</span>
-                        <span className="text-[11px] font-mono text-cyan-400">{fmtClock(s.startTime)}–{fmtClock(s.endTime)}</span>
-                        <SectionBadge title={s.title} />
-                        {s.lipSyncEnabled && (
-                          <span className="text-[9px] font-bold bg-fuchsia-950 text-fuchsia-300 px-1.5 py-0.5 rounded border border-fuchsia-800">LIP SYNC</span>
-                        )}
-                        {status === 'approved' && (
-                          <span className="text-[9px] font-bold bg-emerald-950 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-800">APPROVED ✓</span>
-                        )}
-                        {status === 'vetoed' && (
-                          <span className="text-[9px] font-bold bg-red-950 text-red-300 px-1.5 py-0.5 rounded border border-red-800">VETOED ✕</span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-slate-400 italic">"{s.lyrics}"</p>
-                      {renderSceneCastChips(i, s)}
-                      <div className="flex gap-3">
-                        <div className="w-28 flex-shrink-0">
-                          {s.keyframeImageUrl ? (
-                            <img src={s.keyframeImageUrl} alt={'Scene ' + s.sceneNumber} className="w-full aspect-[9/16] object-cover rounded-lg border border-slate-700" />
-                          ) : (
-                            <div className="w-full aspect-[9/16] rounded-lg border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
-                              <span className="text-[9px] text-slate-600 text-center px-2">No image — upload in Step 6</span>
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0 space-y-2">
-                          <label className="text-[10px] uppercase font-bold text-slate-400">Video concept <span className="text-slate-600 normal-case">(for your video generator)</span></label>
-                          <MentionBar {...mentionBarProps} onPick={(h) => insertMention(i, 'videoPrompt', 'prompt-vid-' + s.id, s.videoPrompt || compileVideoPrompt(s), h)} />
-                          <textarea
-                            id={'prompt-vid-' + s.id}
-                            rows={4}
-                            value={s.videoPrompt || compileVideoPrompt(s)}
-                            onChange={(e) => { updateScene(i, { videoPrompt: e.target.value }); detectAt(e, 'vid-' + s.id); }}
-                            onKeyUp={(e) => detectAt(e, 'vid-' + s.id)}
-                            onSelect={(e) => trackCaret('prompt-vid-' + s.id, e)}
-                            onBlur={(e) => trackCaret('prompt-vid-' + s.id, e)}
-                            className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-emerald-500"
-                          />
-                          {atQuery && atQuery.key === ('vid-' + s.id) && (
-                            <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(i, 'videoPrompt', 'prompt-vid-' + s.id, 'vid-' + s.id, h)} />
-                          )}
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => updateScene(i, { reviewStatus: status === 'approved' ? 'pending' : 'approved' })}
-                              className={'text-[10px] font-bold px-3 py-1.5 rounded-lg border flex items-center space-x-1 transition ' + (status === 'approved' ? 'bg-emerald-600/40 border-emerald-500 text-emerald-200' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-emerald-300 hover:border-emerald-700')}
-                            >
-                              <Check className="w-3 h-3" /><span>{status === 'approved' ? 'Approved ✓' : 'Approve'}</span>
-                            </button>
-                            <button
-                              onClick={() => updateScene(i, { reviewStatus: status === 'vetoed' ? 'pending' : 'vetoed' })}
-                              className={'text-[10px] font-bold px-3 py-1.5 rounded-lg border flex items-center space-x-1 transition ' + (status === 'vetoed' ? 'bg-red-600/40 border-red-500 text-red-200' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-red-300 hover:border-red-700')}
-                            >
-                              <X className="w-3 h-3" /><span>{status === 'vetoed' ? 'Vetoed ✕' : 'Veto'}</span>
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-                {!segments.length && (
-                  <p className="text-xs text-slate-500 bg-slate-900/60 border border-slate-800 rounded-xl p-4 text-center">
-                    No scenes yet — start at Step 1 with your song.
-                  </p>
-                )}
-                <DirectorContinue next={8}>Continue to the Bible</DirectorContinue>
-              </div>
-            )}
-
-            {/* STEP 8 — The Bible: image, then prompt, per scene */}
-            {shownDirectorStep === 8 && (
+            {/* STEP 5 — The Bible: image, then prompt, per scene */}
+            {shownDirectorStep === 5 && (
               <div className="space-y-4">
                 <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg flex items-center justify-between flex-wrap gap-3">
                   <div>
                     <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-                      <BookOpen className="w-4 h-4 text-indigo-400" /><span>Step 8 — The Bible</span>
+                      <BookOpen className="w-4 h-4 text-indigo-400" /><span>Step 5 — Bible (Storyboard)</span>
                     </h2>
-                    <p className="text-[10px] text-slate-500 mt-1">Image, then prompt, scene by scene — copy each prompt straight into your video generator.</p>
+                    <p className="text-[10px] text-slate-500 mt-1">Your storyboard: each scene's image with its ONE video prompt — copy the pair straight into your video generator.</p>
                   </div>
                   <button
                     onClick={copyAllBible}
@@ -4081,7 +3916,7 @@ export default function DDCDirectorStudio() {
                     className="text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white px-3 py-2 rounded-lg flex items-center space-x-1.5 transition"
                   >
                     {copyFeedback === 'bible-all' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copyFeedback === 'bible-all' ? 'Copied!' : 'Copy all prompts'}</span>
+                    <span>{copyFeedback === 'bible-all' ? 'Copied!' : 'Copy all video prompts'}</span>
                   </button>
                 </div>
                 {segments.map((s, i) => (
@@ -4103,33 +3938,47 @@ export default function DDCDirectorStudio() {
                         <img src={s.keyframeImageUrl} alt={'Scene ' + s.sceneNumber + ' visual'} className="w-full aspect-[9/16] object-cover rounded-xl border border-slate-700" />
                       ) : (
                         <div className="w-full aspect-[9/16] rounded-xl border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
-                          <span className="text-[9px] text-slate-600 text-center px-2">No image — upload in Step 6</span>
+                          <span className="text-[9px] text-slate-600 text-center px-2">No image — upload it in Images to Create</span>
                         </div>
                       )}
                     </div>
-                    <div className="flex justify-between items-center">
-                      <label className="text-[10px] uppercase font-bold text-slate-400">Production prompt <span className="text-slate-600 normal-case">(your video generator)</span></label>
+                    <div className="flex gap-2">
                       <button
-                        onClick={() => copyText('bible-' + s.id, sceneTag(s) + ': ' + expandLyric(expandMentions(s.biblePrompt || compileBiblePrompt(s)), s))}
+                        onClick={() => updateScene(i, { reviewStatus: s.reviewStatus === 'approved' ? 'pending' : 'approved' })}
+                        className={'text-[10px] font-bold px-3 py-1.5 rounded-lg border flex items-center space-x-1 transition ' + (s.reviewStatus === 'approved' ? 'bg-emerald-600/40 border-emerald-500 text-emerald-200' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-emerald-300 hover:border-emerald-700')}
+                      >
+                        <Check className="w-3 h-3" /><span>{s.reviewStatus === 'approved' ? 'Approved \u2713' : 'Approve'}</span>
+                      </button>
+                      <button
+                        onClick={() => updateScene(i, { reviewStatus: s.reviewStatus === 'vetoed' ? 'pending' : 'vetoed' })}
+                        className={'text-[10px] font-bold px-3 py-1.5 rounded-lg border flex items-center space-x-1 transition ' + (s.reviewStatus === 'vetoed' ? 'bg-red-600/40 border-red-500 text-red-200' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-red-300 hover:border-red-700')}
+                      >
+                        <X className="w-3 h-3" /><span>{s.reviewStatus === 'vetoed' ? 'Vetoed \u2715' : 'Veto'}</span>
+                      </button>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <label className="text-[10px] uppercase font-bold text-slate-400">Video prompt <span className="text-slate-600 normal-case">(one per scene \u2014 your video generator)</span></label>
+                      <button
+                        onClick={() => copyText('bible-' + s.id, sceneTag(s) + ': ' + expandLyric(expandMentions(s.videoPrompt || compileVideoPrompt(s)), s))}
                         className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition"
                       >
                         {copyFeedback === ('bible-' + s.id) ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                         <span>{copyFeedback === ('bible-' + s.id) ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
-                    <MentionBar {...mentionBarProps} onPick={(h) => insertMention(i, 'biblePrompt', 'prompt-bible-' + s.id, s.biblePrompt || compileBiblePrompt(s), h)} />
+                    <MentionBar {...mentionBarProps} onPick={(h) => insertMention(i, 'videoPrompt', 'prompt-bible-' + s.id, s.videoPrompt || compileVideoPrompt(s), h)} />
                     <textarea
                       id={'prompt-bible-' + s.id}
                       rows={6}
-                      value={s.biblePrompt || compileBiblePrompt(s)}
-                      onChange={(e) => { updateScene(i, { biblePrompt: e.target.value }); detectAt(e, 'bible-' + s.id); }}
+                      value={s.videoPrompt || compileVideoPrompt(s)}
+                      onChange={(e) => { updateScene(i, { videoPrompt: e.target.value }); detectAt(e, 'bible-' + s.id); }}
                       onKeyUp={(e) => detectAt(e, 'bible-' + s.id)}
                       onSelect={(e) => trackCaret('prompt-bible-' + s.id, e)}
                       onBlur={(e) => trackCaret('prompt-bible-' + s.id, e)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
                     />
                     {atQuery && atQuery.key === ('bible-' + s.id) && (
-                      <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(i, 'biblePrompt', 'prompt-bible-' + s.id, 'bible-' + s.id, h)} />
+                      <AtSuggestRow query={atQuery.query} presets={suggestPool} onPick={(h) => pickAtSuggestion(i, 'videoPrompt', 'prompt-bible-' + s.id, 'bible-' + s.id, h)} />
                     )}
                     <p className="text-[10px] text-slate-600">{'{{LYRIC}}'} always pulls the scene's current lyrics when you copy.</p>
                   </div>
@@ -4139,19 +3988,19 @@ export default function DDCDirectorStudio() {
                     No scenes yet — start at Step 1 with your song.
                   </p>
                 )}
-                <DirectorContinue next={9}>Continue to finished video</DirectorContinue>
+                <DirectorContinue next={6}>Continue to Videos</DirectorContinue>
               </div>
             )}
 
-            {/* STEP 9 — Finished video */}
-            {shownDirectorStep === 9 && (
+            {/* STEP 6 — Finished video */}
+            {shownDirectorStep === 6 && (
               <div className="space-y-4">
                 <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg">
                   <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-                    <Clapperboard className="w-4 h-4 text-cyan-400" /><span>Step 9 — Finished video</span>
+                    <Clapperboard className="w-4 h-4 text-cyan-400" /><span>Step 6 — Videos</span>
                   </h2>
                   <p className="text-[10px] text-slate-500 mt-1">
-                    Attach one motion clip per scene. Each clip is auto-placed at its scene timestamp, trimmed or looped to fill the interval, then your song is mixed underneath.
+                    Plug in all the videos you made — one clip per scene, in order. Each clip is auto-placed at its scene timestamp, trimmed or looped to fill the interval, then your song is mixed underneath.
                   </p>
                 </div>
                 {segments.map((s, i) => {
