@@ -168,7 +168,7 @@ async function idbDeleteSong(id) {
 }
 
 /* ============================== INDEXEDDB SCENE IMAGES ============================== */
-// Per-scene stills she uploads (Fooocus results) persist here as blobs so they survive
+// Per-scene stills she uploads (your image generator results) persist here as blobs so they survive
 // reloads. Keyed `${projectId}:${sceneId}`.
 const IDB_IMG_DB = 'ddc-studio-images';
 const IDB_IMG_STORE = 'images';
@@ -897,7 +897,7 @@ function AtSuggestRow({ query, presets, onPick }) {  const matches = (presets ||
     </div>
   );
 }
-/* Editable portrait-prompt panel per character (Fooocus). */
+/* Editable portrait-prompt panel per character. */
 function PortraitPromptBox({ char, defaultText, copyText, copyFeedback, onClose }) {
   const [draft, setDraft] = React.useState(defaultText);
   const dirty = draft !== defaultText;
@@ -905,7 +905,7 @@ function PortraitPromptBox({ char, defaultText, copyText, copyFeedback, onClose 
   return (
     <div className="mt-3 bg-slate-950 border border-indigo-900/60 rounded-xl p-3 space-y-2">
       <div className="flex justify-between items-center">
-        <label className="text-[10px] uppercase font-bold text-indigo-300">Portrait prompt <span className="text-slate-500 normal-case">(Fooocus)</span></label>
+        <label className="text-[10px] uppercase font-bold text-indigo-300">Portrait prompt</label>
         <button onClick={onClose} className="text-slate-500 hover:text-slate-300 transition" aria-label="Close portrait prompt">
           <X className="w-3.5 h-3.5" />
         </button>
@@ -1785,7 +1785,7 @@ export default function DDCDirectorStudio() {
   };
 
   /* ------------------------- prompt compilers ------------------------- */
-  /* Text-to-image prompt (Fooocus), Lindsey's template, simplified 2026-10-21:
+  /* Text-to-image prompt, Lindsey's template, simplified 2026-10-21:
      header → per-character SUBJECT / POSE & ACTION → SCENE → ENVIRONMENT →
      CAMERA → LIGHTING → COLOR & MOOD → STYLE & QUALITY → CONSISTENCY → AVOID.
      Characters are NAMED only (name + role) — Lindsey already has their reference
@@ -1832,7 +1832,9 @@ export default function DDCDirectorStudio() {
     const people = scenePeople(scene);
     const women = people.filter((c) => genderWord(c) === 'Woman').length;
     const men = people.filter((c) => genderWord(c) === 'Man').length;
-    const others = people.filter((c) => genderWord(c) !== 'Woman' && genderWord(c) !== 'Man').map((c) => c.name);
+    // Animals / others go by plain name — strip the leading emoji so the
+    // prompt reads "Vulture", not "🦅 Vulture".
+    const others = people.filter((c) => genderWord(c) !== 'Woman' && genderWord(c) !== 'Man').map((c) => (c.name || '').replace(/^[^\p{L}\p{N}]+/u, '').trim());
     const parts = [];
     if (women === 1) parts.push('Woman');
     if (women > 1) parts.push(women === 2 ? 'Two women' : women + ' women');
@@ -1930,7 +1932,7 @@ export default function DDCDirectorStudio() {
     if (!text || typeof text !== 'string') return text;
     return text.split('{{LYRIC}}').join((scene && scene.lyrics) || '');
   };
-  // Standalone Fooocus prompt for generating one character's reference portrait.
+  // Standalone prompt for generating one character's reference portrait.
   const compilePortraitPrompt = (p) => {
     const h = p.handle || deriveHandle(p.name);
     const desc = charSummary(p) || [p.face, p.hair ? `Hair: ${p.hair}` : '', p.outfit ? `Wearing ${p.outfit}` : '', p.styleNotes || ''].filter(Boolean).join(' ');
@@ -2745,7 +2747,7 @@ export default function DDCDirectorStudio() {
     copyText('bible-all', text || 'No scenes yet.');
   };
 
-  /* ------------------------- Director: copy ALL image prompts (paste into Fooocus) ------------------------- */
+  /* ------------------------- Director: copy ALL image prompts ------------------------- */
   const copyAllImagePrompts = () => {
     const text = segments.map(s => {
       const charsLine = sceneCharacterLine(s);
@@ -2829,7 +2831,7 @@ export default function DDCDirectorStudio() {
     updateScene(index, { clipUrl: null, clipName: '' });
   };
 
-  /* ------------------------- per-scene still upload (her Fooocus results) ------------------------- */
+  /* ------------------------- per-scene still upload (her image generator results) ------------------------- */
   const handleSceneImageUpload = async (index, file) => {
     if (!file) return;
     const scene = segments[index];
@@ -3441,7 +3443,7 @@ export default function DDCDirectorStudio() {
                   </div>
                 ) : (
                   <div className="p-3 bg-slate-950 rounded-xl border border-dashed border-slate-800 text-center">
-                    <p className="text-[10px] text-slate-500">No still yet — upload your Fooocus image for this scene.</p>
+                    <p className="text-[10px] text-slate-500">No still yet — upload your image for this scene.</p>
                   </div>
                 )}
 
@@ -3481,7 +3483,7 @@ export default function DDCDirectorStudio() {
                 <div className="space-y-4">
                   <div className="space-y-2">
                     <div className="flex justify-between items-center">
-                      <label className="text-xs font-bold text-slate-300">Image prompt <span className="text-slate-500 font-normal">(one per scene — for Fooocus)</span></label>
+                      <label className="text-xs font-bold text-slate-300">Image prompt <span className="text-slate-500 font-normal">(one per scene)</span></label>
                       <button onClick={() => copyText('imgp-scene', sceneTag(scene) + ' \u00b7 ' + fmtClock(scene.startTime) + '\u2013' + fmtClock(scene.endTime) + '\n' + expandLyric(expandMentions(scene.approvedPrompt || compilePromptForScene(scene)), scene))} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-emerald-400 px-2 py-1 rounded flex items-center space-x-1 transition">
                         {copyFeedback === 'imgp-scene' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}<span>{copyFeedback === 'imgp-scene' ? 'Copied' : 'Copy'}</span>
                       </button>
@@ -3819,7 +3821,7 @@ export default function DDCDirectorStudio() {
               </div>
             )}
 
-            {/* STEP 4 — Image prompts (prompt-only: copy into Fooocus) */}
+            {/* STEP 4 — Image prompts (prompt-only: copy into your image generator) */}
             {shownDirectorStep === 4 && (
               <div className="space-y-4">
                 <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg flex items-center justify-between flex-wrap gap-3">
@@ -3827,7 +3829,7 @@ export default function DDCDirectorStudio() {
                     <h2 className="text-sm font-bold text-white flex items-center space-x-2">
                       <Sparkles className="w-4 h-4 text-emerald-400" /><span>Step 4 — Images to Create</span>
                     </h2>
-                    <p className="text-[10px] text-slate-500 mt-1">One image prompt per scene — that's it. Copy it, make the image in Fooocus, then upload it right here in the same card. <span className="text-amber-300 font-bold">Important: in Fooocus, load your character reference image too — text alone makes a generic woman/man, it cannot know your character's face.</span></p>
+                    <p className="text-[10px] text-slate-500 mt-1">One image prompt per scene — that's it. Copy it, make the image in your image generator, then upload it right here in the same card. <span className="text-amber-300 font-bold">Important: in your image generator, load your character reference image too — text alone makes a generic woman/man, it cannot know your character's face.</span></p>
                   </div>
                   <div className="flex gap-2 flex-wrap">
                     <button
@@ -3903,7 +3905,7 @@ export default function DDCDirectorStudio() {
                       </div>
                     </details>
                     <div className="flex justify-between items-center">
-                      <label className="text-[10px] uppercase font-bold text-slate-400">Image prompt <span className="text-slate-600 normal-case">(one per scene \u2014 Fooocus)</span></label>
+                      <label className="text-[10px] uppercase font-bold text-slate-400">Image prompt <span className="text-slate-600 normal-case">(one per scene)</span></label>
                       <div className="flex gap-1.5">
                         <button
                           onClick={() => updateScene(i, { approvedPrompt: '' })}
