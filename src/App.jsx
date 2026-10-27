@@ -1818,17 +1818,38 @@ export default function DDCDirectorStudio() {
     const g = ((c && c.gender) || '').toLowerCase();
     if (g.includes('female') || g.includes('woman') || g === 'f') return 'Woman';
     if (g.includes('male') || g.includes('man') || g === 'm') return 'Man';
+    // Built-in presets carry category, not gender — use it, or the prompt
+    // would say the character's NAME (with emoji) instead of Woman/Man.
+    const cat = ((c && c.category) || '').toLowerCase();
+    if (cat.includes('women') || cat.includes('female')) return 'Woman';
+    if (cat.includes('men') || cat.includes('male')) return 'Man';
     return (c && c.name) || 'Woman';
   };
   const isBackgroundOnly = (scene) => /b-?roll|background/i.test(scene.shotType || '') || !((scene.characterAction || '').trim());
   const subjectWords = (scene) => {
-    const words = [];
-    scenePeople(scene).forEach((c) => { const w = genderWord(c); if (!words.includes(w)) words.push(w); });
-    return words.join(' and ');
+    // Keep EVERY person in the scene: two women must read as two women,
+    // not collapse to a single "Woman" (the old dedupe dropped the 2nd person).
+    const people = scenePeople(scene);
+    const women = people.filter((c) => genderWord(c) === 'Woman').length;
+    const men = people.filter((c) => genderWord(c) === 'Man').length;
+    const others = people.filter((c) => genderWord(c) !== 'Woman' && genderWord(c) !== 'Man').map((c) => c.name);
+    const parts = [];
+    if (women === 1) parts.push('Woman');
+    if (women > 1) parts.push(women === 2 ? 'Two women' : women + ' women');
+    if (men === 1) parts.push('Man');
+    if (men > 1) parts.push(men === 2 ? 'Two men' : men + ' men');
+    parts.push(...others);
+    return parts.join(' and ') || 'Woman';
   };
   const lcAction = (scene) => {
     const a = (scene.characterAction || 'performs at center frame').trim().replace(/\.$/, '');
-    return a.charAt(0).toLowerCase() + a.slice(1);
+    const first = a.charAt(0).toLowerCase() + a.slice(1);
+    // Multi-person subject needs the plural verb: "Two women run…", not "runs…".
+    if (scenePeople(scene).length > 1) {
+      const m = first.match(/^(\w+)s\b(.*)$/);
+      if (m && !first.startsWith('is ') && !first.startsWith('has ')) return m[1] + m[2];
+    }
+    return first;
   };
 
   /* ONE image prompt per scene — Lindsey's simple format (2026-10-21):
@@ -1856,11 +1877,6 @@ export default function DDCDirectorStudio() {
     lines.push(`Style: ${lockedStyle.descriptor}, photorealistic, cinematic, ultra-detailed. No text, no watermarks.`);
     return lines.join('\n');
   };
-  /* ONE video prompt per scene (image-to-video), Lindsey's labeled format
-     (simplified 2026-10-21). Merges the old video / Bible / lip-sync / B-roll
-     prompts into this single one: lip sync, when on for the scene, is a line
-     inside it — never a separate prompt. Characters are named by clean label
-     only (Character 1 (Lead)) — their reference/input image carries the look. */
   /* ONE video prompt per scene — Lindsey's simple format (2026-10-21):
      "[Woman/Man] in this image doing [action] in [background]", then EITHER
      a lip sync line with the lyric OR a B-roll line — never both, never
@@ -1873,7 +1889,7 @@ export default function DDCDirectorStudio() {
       lines.push(`B-roll: no lip sync — the background comes alive with subtle motion, atmosphere and texture only.`);
     } else {
       const subj = subjectWords(scene);
-      const verb = subj.includes(' and ') ? 'are' : 'is';
+      const verb = scenePeople(scene).length > 1 ? 'are' : 'is';
       lines.push(`${subj} in this image ${verb} ${lcAction(scene)} in ${bg}.`);
       if (scene.lipSyncEnabled) {
         lines.push(`Lip sync: "{{LYRIC}}" — sings this lyric to camera, mouth and lips clearly matching the words, face centered and sharp the whole shot.`);
@@ -2741,6 +2757,18 @@ export default function DDCDirectorStudio() {
       );
     }).join('\n\n---\n\n');
     copyText('imgprompts-all', text || 'No scenes yet.');
+  };
+
+  /* Reset prompts to the new simple format (2026-10-27): stored prompt text
+     wins over the compiler, so scenes saved under the old formats would never
+     pick up the new one until cleared. These clear it, per scene or all at once. */
+  const resetAllPrompts = (field) => {
+    if (!window.confirm('Reset ALL ' + (field === 'approvedPrompt' ? 'image' : 'video') + ' prompts to the new simple format? Your hand-edits to those prompts will be replaced.')) return;
+    setSegments((prev) => {
+      const next = prev.map((s) => ({ ...s, [field]: '' }));
+      persist(project, lyricsText, next);
+      return next;
+    });
   };
 
   /* ------------------------- On-device transcription (free) ------------------------- */
@@ -3799,16 +3827,25 @@ export default function DDCDirectorStudio() {
                     <h2 className="text-sm font-bold text-white flex items-center space-x-2">
                       <Sparkles className="w-4 h-4 text-emerald-400" /><span>Step 4 — Images to Create</span>
                     </h2>
-                    <p className="text-[10px] text-slate-500 mt-1">One image prompt per scene — that's it. Copy it, make the image in Fooocus, then upload it right here in the same card.</p>
+                    <p className="text-[10px] text-slate-500 mt-1">One image prompt per scene — that's it. Copy it, make the image in Fooocus, then upload it right here in the same card. <span className="text-amber-300 font-bold">Important: in Fooocus, load your character reference image too — text alone makes a generic woman/man, it cannot know your character's face.</span></p>
                   </div>
-                  <button
-                    onClick={copyAllImagePrompts}
-                    disabled={!segments.length}
-                    className="text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-3 py-2 rounded-lg flex items-center space-x-1.5 transition"
-                  >
-                    {copyFeedback === 'imgprompts-all' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copyFeedback === 'imgprompts-all' ? 'Copied!' : 'Copy ALL image prompts'}</span>
-                  </button>
+                  <div className="flex gap-2 flex-wrap">
+                    <button
+                      onClick={copyAllImagePrompts}
+                      disabled={!segments.length}
+                      className="text-xs font-bold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-3 py-2 rounded-lg flex items-center space-x-1.5 transition"
+                    >
+                      {copyFeedback === 'imgprompts-all' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copyFeedback === 'imgprompts-all' ? 'Copied!' : 'Copy ALL image prompts'}</span>
+                    </button>
+                    <button
+                      onClick={() => resetAllPrompts('approvedPrompt')}
+                      disabled={!segments.length}
+                      className="text-xs font-bold bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-amber-300 px-3 py-2 rounded-lg transition"
+                    >
+                      Reset all to new format
+                    </button>
+                  </div>
                 </div>
                 {segments.map((s, i) => (
                   <div key={s.id} className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg">
@@ -3867,13 +3904,22 @@ export default function DDCDirectorStudio() {
                     </details>
                     <div className="flex justify-between items-center">
                       <label className="text-[10px] uppercase font-bold text-slate-400">Image prompt <span className="text-slate-600 normal-case">(one per scene \u2014 Fooocus)</span></label>
-                      <button
-                        onClick={() => copyText('imgp-' + s.id, sceneTag(s) + ': ' + expandLyric(expandMentions(s.approvedPrompt || compilePromptForScene(s)), s))}
-                        className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-emerald-400 px-2 py-1 rounded flex items-center space-x-1 transition"
-                      >
-                        {copyFeedback === ('imgp-' + s.id) ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                        <span>{copyFeedback === ('imgp-' + s.id) ? 'Copied' : 'Copy'}</span>
-                      </button>
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={() => updateScene(i, { approvedPrompt: '' })}
+                          title="Clear this prompt so it regenerates in the new simple format"
+                          className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-amber-300 px-2 py-1 rounded transition"
+                        >
+                          New format
+                        </button>
+                        <button
+                          onClick={() => copyText('imgp-' + s.id, sceneTag(s) + ': ' + expandLyric(expandMentions(s.approvedPrompt || compilePromptForScene(s)), s))}
+                          className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-emerald-400 px-2 py-1 rounded flex items-center space-x-1 transition"
+                        >
+                          {copyFeedback === ('imgp-' + s.id) ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                          <span>{copyFeedback === ('imgp-' + s.id) ? 'Copied' : 'Copy'}</span>
+                        </button>
+                      </div>
                     </div>
                     <MentionBar {...mentionBarProps} onPick={(h) => insertMention(i, 'approvedPrompt', 'prompt-img-' + s.id, s.approvedPrompt || compilePromptForScene(s), h)} />
                     <textarea
@@ -3910,14 +3956,23 @@ export default function DDCDirectorStudio() {
                     </h2>
                     <p className="text-[10px] text-slate-500 mt-1">Your storyboard: each scene's image with its ONE video prompt — copy the pair straight into your video generator.</p>
                   </div>
-                  <button
-                    onClick={copyAllBible}
-                    disabled={!segments.length}
-                    className="text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white px-3 py-2 rounded-lg flex items-center space-x-1.5 transition"
-                  >
-                    {copyFeedback === 'bible-all' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copyFeedback === 'bible-all' ? 'Copied!' : 'Copy all video prompts'}</span>
-                  </button>
+                  <div className="flex gap-2 flex-wrap">
+                    <button
+                      onClick={copyAllBible}
+                      disabled={!segments.length}
+                      className="text-xs font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white px-3 py-2 rounded-lg flex items-center space-x-1.5 transition"
+                    >
+                      {copyFeedback === 'bible-all' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copyFeedback === 'bible-all' ? 'Copied!' : 'Copy all video prompts'}</span>
+                    </button>
+                    <button
+                      onClick={() => resetAllPrompts('videoPrompt')}
+                      disabled={!segments.length}
+                      className="text-xs font-bold bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-amber-300 px-3 py-2 rounded-lg transition"
+                    >
+                      Reset all to new format
+                    </button>
+                  </div>
                 </div>
                 {segments.map((s, i) => (
                   <div key={s.id} className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg">
@@ -3958,13 +4013,22 @@ export default function DDCDirectorStudio() {
                     </div>
                     <div className="flex justify-between items-center">
                       <label className="text-[10px] uppercase font-bold text-slate-400">Video prompt <span className="text-slate-600 normal-case">(one per scene \u2014 your video generator)</span></label>
-                      <button
-                        onClick={() => copyText('bible-' + s.id, sceneTag(s) + ': ' + expandLyric(expandMentions(s.videoPrompt || compileVideoPrompt(s)), s))}
-                        className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition"
-                      >
-                        {copyFeedback === ('bible-' + s.id) ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                        <span>{copyFeedback === ('bible-' + s.id) ? 'Copied' : 'Copy'}</span>
-                      </button>
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={() => updateScene(i, { videoPrompt: '' })}
+                          title="Clear this prompt so it regenerates in the new simple format"
+                          className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-amber-300 px-2 py-1 rounded transition"
+                        >
+                          New format
+                        </button>
+                        <button
+                          onClick={() => copyText('bible-' + s.id, sceneTag(s) + ': ' + expandLyric(expandMentions(s.videoPrompt || compileVideoPrompt(s)), s))}
+                          className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-400 px-2 py-1 rounded flex items-center space-x-1 transition"
+                        >
+                          {copyFeedback === ('bible-' + s.id) ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                          <span>{copyFeedback === ('bible-' + s.id) ? 'Copied' : 'Copy'}</span>
+                        </button>
+                      </div>
                     </div>
                     <MentionBar {...mentionBarProps} onPick={(h) => insertMention(i, 'videoPrompt', 'prompt-bible-' + s.id, s.videoPrompt || compileVideoPrompt(s), h)} />
                     <textarea
