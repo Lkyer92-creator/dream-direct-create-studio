@@ -1803,6 +1803,16 @@ export default function DDCDirectorStudio() {
     c.wardrobe ? `wearing ${c.wardrobe}` : '',
     c.accessories ? `accessories: ${c.accessories}` : '',
   ].filter(Boolean).join(', ');
+  const ROLE_BEATS = {
+    star: 'performs at center frame',
+    colead: 'moves in sync with the lead, close beside them',
+    confidant: 'stays near the lead, reacting with quiet intensity',
+    mentor: 'observes with calm authority, gesturing guidance',
+    light: 'moves playfully at the edge of frame, bringing levity',
+    muse: 'drifts almost still, ethereal, drawing the eye',
+    tragic: 'withdraws slowly, shoulders falling, lost in the moment',
+    antagonist: 'advances with menacing intent, eyes locked on the lead',
+  };
   const charPoseAction = (c, i, scene) => {
     const action = i === 0
       ? (scene.characterAction || 'performing at center frame')
@@ -1854,38 +1864,54 @@ export default function DDCDirectorStudio() {
     return first;
   };
 
-  /* ONE image prompt per scene — Lindsey's simple format (2026-10-21):
-     "[Woman/Man] doing [action] in [background]" — or just the background —
-     plus lighting, colors, camera, and style. Scene # and time ride in the
-     card header / copy header, not in the prompt body. */
+  /* ONE image prompt per scene — Lindsey's master template (2026-10-29,
+     "use this template for new prompts going forward"). Generator-neutral:
+     no generator, app, or hardware name anywhere. Each scene's prompt is
+     particular to THAT scene: its own cast, action, lyric, environment
+     layers, camera, and lighting — not the project defaults repeated.
+     SUBJECT uses the character's full description from the template, plus a
+     reference-image line, so the prompt anchors the face even when no
+     reference is loaded alongside it. */
   const compilePromptForScene = (scene) => {
+    const people = scenePeople(scene);
     const bg = scene.envBG || scene.setting || lockedTheme.notes;
-    const lines = [];
+    const lyric = (scene.lyrics || '').trim();
+    const lines = [`Create a ${lockedStyle.descriptor} image in 9:16.`, ''];
     if (isBackgroundOnly(scene)) {
-      lines.push(`Just background: ${bg}.`);
+      lines.push('SUBJECT: No people — background only.');
+      lines.push('POSE & ACTION: No action — still, empty scene.');
     } else {
-      lines.push(`${subjectWords(scene)} ${lcAction(scene)} in ${bg}.`);
-      lines.push(`Use their reference images for their exact looks — do not redesign them.`);
+      people.forEach((c, i) => {
+        const rd = c.role ? roleDef(c.role) : null;
+        const tag = people.length > 1 ? ` (Character ${cast.findIndex(x => x.id === c.id) + 1})` : '';
+        const plainName = (c.name || '').replace(/^[^\p{L}\p{N}]+/u, '').trim();
+        lines.push(`SUBJECT${tag}: ${plainName}${rd ? `, ${rd.label}` : ''} — ${fullAppearance(c)}`);
+        lines.push(`POSE & ACTION${tag}: ${charPoseAction(c, i, scene)}`);
+      });
+      lines.push('Use their reference images for their exact looks — do not redesign them.');
     }
-    const layers = [
-      scene.envFG ? `Foreground: ${scene.envFG}` : '',
-      scene.envMG ? `Midground: ${scene.envMG}` : '',
-      scene.envProps ? `Props: ${scene.envProps}` : '',
-    ].filter(Boolean).join('. ');
-    if (layers) lines.push(layers + '.');
-    lines.push(`Lighting: ${scene.lightingMood}.`);
-    lines.push(`Colors: ${lockedPalette.hexes.join(', ')}${lockedPalette.mood ? ` — ${lockedPalette.mood}` : ''}.`);
-    lines.push(`Camera: ${scene.cameraAngle}, ${scene.cameraMovement}, 9:16 vertical.`);
-    lines.push(`Style: ${lockedStyle.descriptor}, photorealistic, cinematic, ultra-detailed. No text, no watermarks.`);
+    lines.push('');
+    lines.push(`SCENE: ${bg}${lyric ? ` — mood of the lyric: "${lyric}"` : ''}.`);
+    lines.push(`ENVIRONMENT: Foreground: ${scene.envFG || '—'}. Midground: ${scene.envMG || '—'}. Background: ${bg}. Props and details: ${scene.envProps || '—'}.`);
+    lines.push(`CAMERA: ${scene.shotType || 'Motion clip'} shot, ${scene.cameraAngle} angle, ${scene.cameraMovement} perspective, vertical 9:16 framing, cinematic lens, sharp focus on the subjects with soft depth of field.`);
+    lines.push(`LIGHTING: ${scene.lightingMood}; soft directional source, gentle shadows, luminous highlights.`);
+    lines.push(`COLOR & MOOD: palette ${lockedPalette.hexes.join(', ')}${lockedPalette.mood ? `, ${lockedPalette.mood}` : ''}${lyric ? `; emotional tone of "${lyric}"` : ''}.`);
+    lines.push(`STYLE & QUALITY: ${lockedStyle.descriptor}, photorealistic, ultra-detailed skin and fabric textures, polished cinematic finish.`);
+    lines.push(`CONSISTENCY: keep every character's face, wardrobe, and identifying features identical across all scenes of this video, and match their reference images. Leave breathing room around the subjects — do not crop limbs or heads.`);
+    lines.push(`AVOID: text, watermarks, logos, extra limbs, deformed hands, blurry faces.`);
+    lines.push(`VIDEO PREPARATION: leave breathing room around the subjects — do not crop limbs or heads that will move; keep environmental depth around the background so nothing flattens during animation.`);
     return lines.join('\n');
   };
-  /* ONE video prompt per scene — Lindsey's simple format (2026-10-21):
-     "[Woman/Man] in this image doing [action] in [background]", then EITHER
-     a lip sync line with the lyric OR a B-roll line — never both, never
-     separate prompts. */
+  /* ONE video prompt per scene — particular to THIS scene's image.
+     The old version only alternated lip-sync/B-roll and two camera pairs,
+     and showed the same "{{LYRIC}}" token in every scene, so every prompt
+     read the same. This one names the start frame, bakes in the scene's
+     actual lyric, and uses the scene's own action, background, and camera. */
   const compileVideoPrompt = (scene) => {
     const bg = scene.envBG || scene.setting || lockedTheme.notes;
+    const lyric = (scene.lyrics || '').trim();
     const lines = [];
+    lines.push(`Start frame: use this scene's image${scene.imageName ? ` ("${scene.imageName}")` : ''} — animate FROM that exact image, do not redesign it.`);
     if (isBackgroundOnly(scene)) {
       lines.push(`This image: ${bg} — background only, no people.`);
       lines.push(`B-roll: no lip sync — the background comes alive with subtle motion, atmosphere and texture only.`);
@@ -1893,14 +1919,14 @@ export default function DDCDirectorStudio() {
       const subj = subjectWords(scene);
       const verb = scenePeople(scene).length > 1 ? 'are' : 'is';
       lines.push(`${subj} in this image ${verb} ${lcAction(scene)} in ${bg}.`);
-      if (scene.lipSyncEnabled) {
-        lines.push(`Lip sync: "{{LYRIC}}" — sings this lyric to camera, mouth and lips clearly matching the words, face centered and sharp the whole shot.`);
+      if (scene.lipSyncEnabled && lyric) {
+        lines.push(`Lip sync: "${lyric}" — sings this lyric directly to camera, mouth and lips clearly matching the words, face centered and sharp the whole shot.`);
       } else {
         lines.push(`B-roll: no lip sync — pure motion and atmosphere, true to the scene.`);
       }
     }
     lines.push(`Camera movement: ${scene.cameraMovement}, ${scene.cameraAngle}. Duration: ${(scene.duration || 0).toFixed(1)}s.`);
-    lines.push(`Keep the faces, outfits, and background exactly as in the image — no new characters, no text, no watermarks.`);
+    lines.push(`Keep the faces, outfits, and background exactly as in this image — no new characters, no text, no watermarks.`);
     return lines.join('\n');
   };
 
@@ -2672,7 +2698,11 @@ export default function DDCDirectorStudio() {
             const patch = { lyrics: newLyric, lyricsLocked: true };
             ['videoPrompt', 'approvedPrompt'].forEach((f) => {
               if (typeof s[f] === 'string' && s[f].includes(oldLyric)) {
-                patch[f] = s[f].split(oldLyric).join('{{LYRIC}}');
+                patch[f] = s[f].split(oldLyric).join(newLyric);
+              }
+              // Legacy token from the old format: expand it to the new lyric too.
+              if (typeof patch[f] === 'string' && patch[f].includes('{{LYRIC}}')) {
+                patch[f] = patch[f].split('{{LYRIC}}').join(newLyric);
               }
             });
             updateScene(index, patch);
@@ -3829,7 +3859,7 @@ export default function DDCDirectorStudio() {
                     <h2 className="text-sm font-bold text-white flex items-center space-x-2">
                       <Sparkles className="w-4 h-4 text-emerald-400" /><span>Step 4 — Images to Create</span>
                     </h2>
-                    <p className="text-[10px] text-slate-500 mt-1">One image prompt per scene — that's it. Copy it, make the image in your image generator, then upload it right here in the same card. <span className="text-amber-300 font-bold">Important: in your image generator, load your character reference image too — text alone makes a generic woman/man, it cannot know your character's face.</span></p>
+                    <p className="text-[10px] text-slate-500 mt-1">One image prompt per scene, in your full template — each one particular to its scene's cast, action, lyric, and lighting. Copy it, make the image in your image generator, then upload it right here in the same card. <span className="text-amber-300 font-bold">Important: in your image generator, load your character reference image too — text alone makes a generic woman/man, it cannot know your character's face.</span></p>
                   </div>
                   <div className="flex gap-2 flex-wrap">
                     <button
@@ -3904,8 +3934,26 @@ export default function DDCDirectorStudio() {
                         ))}
                       </div>
                     </details>
+                    <details className="bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2">
+                      <summary className="text-[10px] font-bold text-slate-400 cursor-pointer select-none">Scene direction <span className="text-slate-600 font-normal">— this is what makes each scene's prompt particular, not a repeat</span></summary>
+                      <div className="grid grid-cols-1 gap-2 mt-2">
+                        {[['characterAction', 'Action — what they do in this scene'], ['setting', 'Background / setting'], ['lightingMood', 'Lighting'], ['cameraAngle', 'Camera angle'], ['cameraMovement', 'Camera movement']].map(([k, label]) => (
+                          <label key={k} className="block">
+                            <span className="text-[9px] uppercase font-bold text-slate-500">{label}</span>
+                            <input
+                              type="text"
+                              value={s[k] || ''}
+                              onChange={(e) => updateScene(i, { [k]: e.target.value })}
+                              placeholder={'—'}
+                              className="mt-0.5 w-full bg-slate-900 border border-slate-800 rounded-lg px-2 py-1.5 text-[11px] text-slate-200 focus:outline-none focus:border-emerald-500"
+                            />
+                          </label>
+                        ))}
+                      </div>
+                      <p className="text-[9px] text-slate-600 mt-2">Change any of these and this scene's image AND video prompts update — same action/background/lighting on every scene is why they all read the same.</p>
+                    </details>
                     <div className="flex justify-between items-center">
-                      <label className="text-[10px] uppercase font-bold text-slate-400">Image prompt <span className="text-slate-600 normal-case">(one per scene)</span></label>
+                      <label className="text-[10px] uppercase font-bold text-slate-400">Image prompt <span className="text-slate-600 normal-case">(one per scene — full template)</span></label>
                       <div className="flex gap-1.5">
                         <button
                           onClick={() => updateScene(i, { approvedPrompt: '' })}
