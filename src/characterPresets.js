@@ -6,7 +6,7 @@
    Handles are unique text-only tags; App.jsx's withHandles() dedupes as a safety net. */
 
 export const BUILTIN_CHARACTER_PRESETS = [
-  /* ============================ WOMEN (20) ============================ */
+  /* ============================ WOMEN (21) ============================ */
   {
     id: 'builtin-w01', name: '⚡ Neon Vex', handle: 'neonVex', category: 'women',
     skinTone: 'rain-slicked olive skin catching magenta neon',
@@ -301,8 +301,22 @@ export const BUILTIN_CHARACTER_PRESETS = [
     accessories: 'Carved wooden mask hanging at her hip, staff topped with a crystal skull',
     notes: 'Theme: firelit village circle at night, drums and rising sparks.',
   },
+  {
+    id: 'builtin-w22', name: '😈 Lucifer', handle: 'devilLucifer', category: 'women',
+    skinTone: 'porcelain-pale skin with a faint ember glow',
+    build: 'tall and statuesque',
+    faceShape: 'elegant and sharp, dark red lips',
+    marks: 'glowing amber eyes with slit pupils, small curved black horns with gold tips, pointed ears, large black bat wings with crimson membranes, long thin black tail with an arrow tip',
+    hair: 'Long wavy black hair with deep crimson streaks',
+    headwear: '',
+    mood: 'confident teasing smirk — seductive, powerful, playful and dangerous',
+    artStyle: 'modern graphic novel comic art, crisp ink linework, cel-shaded dramatic lighting',
+    wardrobe: 'Black off-shoulder corset top with gold trim, high-waisted black leather pants with a thigh-high slit, long black gloves, black stiletto boots',
+    accessories: 'Gold serpent necklace, gold serpent ring, single black rose',
+    notes: 'Theme: dark marble balcony at night, blood-red moon over a city skyline. The devil half of "Two Sides" — the bad-bitch devil to the good-girl fairy.',
+  },
 
-  /* ============================= MEN (20) ============================= */
+  /* ============================= MEN (21) ============================= */
   {
     id: 'builtin-m01', name: '🌊 Captain Elias Barnacle', handle: 'captainBarnacle', category: 'men',
     skinTone: 'rope-burned weather-beaten skin',
@@ -582,6 +596,20 @@ export const BUILTIN_CHARACTER_PRESETS = [
     wardrobe: 'Faded board shorts, open Hawaiian shirt',
     accessories: 'Shell necklace, surfboard tucked under one arm',
     notes: 'Theme: golden-hour beach break, perfect peeling wave.',
+  },
+  {
+    id: 'builtin-m21', name: '😈 Lucien', handle: 'devilLucien', category: 'men',
+    skinTone: 'porcelain-pale skin with a faint ember glow',
+    build: 'tall and broad-shouldered, 6\'2"',
+    faceShape: 'sharp and elegant, short dark stubble, one eyebrow raised',
+    marks: 'glowing amber eyes with slit pupils, curved black horns with gold tips, pointed ears, large black bat wings with crimson membranes, long thin black tail with an arrow tip',
+    hair: 'Slicked-back black hair with deep crimson streaks',
+    headwear: '',
+    mood: 'amused, charming smirk — dangerous, magnetic, the devil you make deals with',
+    artStyle: 'modern graphic novel comic art, crisp ink linework, cel-shaded dramatic lighting',
+    wardrobe: 'Tailored black suit with crimson silk lining, open black shirt, polished black boots',
+    accessories: 'Gold serpent pendant, black leather gloves, glass of dark red wine',
+    notes: 'Theme: dark marble balcony at night, blood-red moon over a city skyline. The male devil — Lucifer\'s counterpart.',
   },
 
   /* ============================ ANIMALS (10) ========================== */
