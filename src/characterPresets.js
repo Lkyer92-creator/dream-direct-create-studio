@@ -6,7 +6,7 @@
    Handles are unique text-only tags; App.jsx's withHandles() dedupes as a safety net. */
 
 export const BUILTIN_CHARACTER_PRESETS = [
-  /* ============================ WOMEN (21) ============================ */
+  /* ============================ WOMEN (22) ============================ */
   {
     id: 'builtin-w01', name: '⚡ Neon Vex', handle: 'neonVex', category: 'women',
     skinTone: 'rain-slicked olive skin catching magenta neon',
@@ -315,8 +315,22 @@ export const BUILTIN_CHARACTER_PRESETS = [
     accessories: 'Gold serpent necklace, gold serpent ring, single black rose',
     notes: 'Theme: dark marble balcony at night, blood-red moon over a city skyline. The devil half of "Two Sides" — the bad-bitch devil to the good-girl fairy.',
   },
+  {
+    id: 'builtin-w23', name: '🧜‍♀️ Marina', handle: 'mermaidMarina', category: 'women',
+    skinTone: 'sun-kissed skin with a faint iridescent shimmer, sea-green scales fading up her hips',
+    build: 'graceful and lithe',
+    faceShape: 'soft and otherworldly, sea-green eyes, full lips',
+    marks: 'delicate gills at her neck, tiny pearls woven through her hair, webbed fingers',
+    hair: 'Long flowing sea-green hair with strands of gold, drifting like kelp',
+    headwear: 'Crown of white coral and pearls',
+    mood: 'haunting, enchanting, longing — a song half-heard over the waves',
+    artStyle: 'modern graphic novel comic art, crisp ink linework, cel-shaded dramatic lighting',
+    wardrobe: 'Bare shoulders and a shimmering teal-and-gold scaled tail, seashell adornments',
+    accessories: 'Pearl necklace, conch shell held in one hand',
+    notes: 'Theme: moonlit rocky shore at the edge of a stormy sea. The mermaid to Caspian\'s sailor — they share the same shore.',
+  },
 
-  /* ============================= MEN (21) ============================= */
+  /* ============================= MEN (22) ============================= */
   {
     id: 'builtin-m01', name: '🌊 Captain Elias Barnacle', handle: 'captainBarnacle', category: 'men',
     skinTone: 'rope-burned weather-beaten skin',
@@ -610,6 +624,20 @@ export const BUILTIN_CHARACTER_PRESETS = [
     wardrobe: 'Tailored black suit with crimson silk lining, open black shirt, polished black boots',
     accessories: 'Gold serpent pendant, black leather gloves, glass of dark red wine',
     notes: 'Theme: dark marble balcony at night, blood-red moon over a city skyline. The male devil — Lucifer\'s counterpart.',
+  },
+  {
+    id: 'builtin-m22', name: '⚓ Caspian', handle: 'sailorCaspian', category: 'men',
+    skinTone: 'sun-bronzed skin, salt-wind weathering',
+    build: 'tall and lean-muscled, 6\'1"',
+    faceShape: 'strong jaw, short dark stubble, storm-grey eyes',
+    marks: 'a thin scar across one eyebrow, an anchor tattoo on his forearm, a compass rose tattoo on his chest',
+    hair: 'Dark windswept hair, damp with sea spray',
+    headwear: 'Navy sailor cap, tilted back',
+    mood: 'daring, yearning, storm-tested — a sailor who heard the song and stayed',
+    artStyle: 'modern graphic novel comic art, crisp ink linework, cel-shaded dramatic lighting',
+    wardrobe: 'Navy peacoat open over a striped sailor shirt, dark trousers, worn leather boots',
+    accessories: 'Brass compass on a chain, coiled rope over one shoulder, a lantern in one hand',
+    notes: 'Theme: moonlit rocky shore at the edge of a stormy sea. The sailor to Marina\'s mermaid — they share the same shore.',
   },
 
   /* ============================ ANIMALS (10) ========================== */

@@ -7,6 +7,7 @@ import {
   Layers, Users, AudioLines, Palette, AtSign, Camera,
 } from 'lucide-react';
 import { BUILTIN_CHARACTER_PRESETS, BUILTIN_CATEGORIES } from './characterPresets.js';
+import { PAIRED_SHOTS } from './pairedScenes.js';
 
 /* ============================== FREE TRANSCRIPTION ============================== */
 // Lyric transcription runs free in Google Colab (open-source Whisper on a free GPU).
@@ -2422,6 +2423,74 @@ export default function DDCDirectorStudio() {
     </button>
   );
 
+  // Insert a built-in paired (two-person) shot as a pre-filled scene at the
+  // end of the list. Both characters join this project's cast if they
+  // aren't in it yet, and the shot's image + video prompts are stored
+  // verbatim, so Images to Create and the Bible show them exactly as written.
+  const insertPairedShot = async (shot) => {
+    const iv = Math.max(1, currentInterval() || 15);
+    const dur = audio && typeof audio.duration === 'number' ? audio.duration : null;
+    let start = segments.length ? segments[segments.length - 1].endTime : 0;
+    start = Math.max(0, start);
+    if (dur != null) start = Math.min(start, dur);
+    let end = start + iv;
+    if (dur != null) end = Math.min(end, dur);
+    if (!(end > start)) return; // guard: no room left in the song
+    // Make sure both characters are in this project's cast.
+    let nextCast = cast;
+    let nextSegs = segments;
+    for (const pid of shot.presetIds) {
+      const preset = BUILTIN_CHARACTER_PRESETS.find(p => p.id === pid);
+      if (!preset) continue;
+      if (nextCast.some(c => c.presetId === preset.id)) continue;
+      const copy = await clonePresetForCast(preset);
+      nextSegs = segsWithNewCastMember(nextSegs, nextCast.map(c => c.id), copy.id);
+      nextCast = [...nextCast, copy];
+    }
+    const pairIds = nextCast.filter(c => shot.presetIds.includes(c.presetId)).map(c => c.id);
+    const idx = nextSegs.length;
+    const fresh = {
+      ...makeSceneShell(idx, nextSegs.length + 1, start, end),
+      title: shot.title,
+      lyrics: shot.lyrics || '',
+      shotType: 'Motion clip',
+      lipSyncEnabled: false,
+      characterAction: 'Reach toward each other across the tide line',
+      cameraAngle: 'Eye level',
+      cameraMovement: 'Slow dolly in',
+      setting: 'Moonlit rocky shore at the edge of a stormy sea',
+      lightingMood: 'Cool silver moonlight, warm golden lantern glow',
+      envFG: 'Tide pools, white foam, scattered seashells on wet sand',
+      envMG: "Marina on the rocks at the water's edge, Caspian beside the beached rowboat, a lit lantern on the sand between them",
+      envBG: 'A stormy dark sea under a full moon in a deep teal sky, the tall ship silhouetted on the horizon',
+      envProps: 'Wave-washed rocks, seashells, beached rowboat, lantern, conch shell, brass compass',
+      approvedPrompt: shot.imagePrompt,
+      biblePrompt: shot.imagePrompt,
+      videoPrompt: shot.videoPrompt,
+      castIds: pairIds.length ? pairIds : nextCast.map(c => c.id),
+    };
+    const finalSegs = renumberScenes([...nextSegs, fresh]);
+    setCast(nextCast);
+    setSegments(finalSegs);
+    setSelectedSceneIndex(idx);
+    writeActiveProject(project, lyricsText, finalSegs, nextCast, null, null);
+  };
+
+  const renderAddPairedShotButtons = () => (
+    <div className="space-y-2">
+      {PAIRED_SHOTS.map((shot) => (
+        <button
+          key={shot.id}
+          onClick={() => insertPairedShot(shot)}
+          className="w-full p-3 border-2 border-dashed border-teal-700 hover:border-teal-400 rounded-xl text-xs font-bold text-slate-400 hover:text-teal-300 flex items-center justify-center space-x-2 transition"
+        >
+          <Users className="w-4 h-4" />
+          <span>Add paired shot: {shot.title}</span>
+        </button>
+      ))}
+    </div>
+  );
+
   /* ------------------------- Director: theme + storyline, generated separately ------------------------- */
   const themeStoryContext = () => {
     const sceneList = segments
@@ -3375,6 +3444,7 @@ export default function DDCDirectorStudio() {
                 </div>
               ))}
               {renderAddSceneButton()}
+              {renderAddPairedShotButtons()}
             </div>
           </div>
         )}
