@@ -642,7 +642,7 @@ export const BUILTIN_CHARACTER_PRESETS = [
   {
     id: 'builtin-m23', name: '💰 Gangster', handle: 'gangsterLead', category: 'men',
     skinTone: 'sun-kissed tan light skin',
-    build: 'tall and broad-shouldered, 6\'0", athletic-skinny build',
+    build: 'tall and broad-shouldered, 6\'3", athletic-skinny build',
     faceShape: 'handsome, strong jaw, sexy smile, dark brown eyes',
     marks: 'gold and diamond teeth flashing when he smiles',
     hair: 'Sharp low fade with a clean lineup and a design on the side of his head',
