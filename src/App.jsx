@@ -2684,6 +2684,7 @@ export default function DDCDirectorStudio() {
           aria-label="Scene end time"
           className={inputCls}
         />
+        <span className="text-[11px] font-mono text-emerald-400">{(s.endTime - s.startTime).toFixed(1)}s long</span>
         {s.customTimes && (
           <span className="text-[9px] font-bold bg-amber-950 text-amber-300 px-1.5 py-0.5 rounded border border-amber-800">CUSTOM</span>
         )}
@@ -2738,6 +2739,23 @@ export default function DDCDirectorStudio() {
       </div>
     );
   };
+
+  // Shared per-scene Background editor (2026-11-15): the scene's background /
+  // setting, in the same card as its cast, timestamp, length, and lyrics — so
+  // one spot per scene holds all five. It feeds the image and video prompts
+  // (the Images page's Scene direction edits the same field, so they stay in sync).
+  const renderSceneBackgroundEditor = (index, s) => (
+    <div className="space-y-1.5">
+      <span className="text-[10px] uppercase font-bold text-slate-500">Background</span>
+      <input
+        type="text"
+        value={s.setting || ''}
+        onChange={(e) => updateScene(index, { setting: e.target.value })}
+        placeholder="Background / setting for this scene…"
+        className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+      />
+    </div>
+  );
 
   // Shared per-scene lyrics editor. Editing locks the scene so "Distribute lines
   // across scenes" and re-slices never overwrite her fix; Re-sync hands it back.
@@ -3440,6 +3458,7 @@ export default function DDCDirectorStudio() {
                   {renderTimeEditor(idx, seg)}
                   {renderSectionLabelEditor(idx, seg)}
                   {renderLyricsEditor(idx, seg)}
+                  {renderSceneBackgroundEditor(idx, seg)}
                   {renderSceneCastChips(idx, seg)}
                 </div>
               ))}
@@ -3857,6 +3876,7 @@ export default function DDCDirectorStudio() {
                       {renderTimeEditor(i, s)}
                       {renderSectionLabelEditor(i, s)}
                       {renderLyricsEditor(i, s)}
+                      {renderSceneBackgroundEditor(i, s)}
                       {renderSceneCastChips(i, s)}
                     </div>
                   ))}
