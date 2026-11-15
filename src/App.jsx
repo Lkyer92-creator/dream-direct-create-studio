@@ -1247,6 +1247,7 @@ export default function DDCDirectorStudio() {
     setAudioMeta(am);
     setSelectedSceneIndex(0);
     setDirectorStep(1);
+    setActiveTab('director');
     setCurrentTime(0);
     setShowCastPicker(false);
     setProjectIndex(prev => {
@@ -4302,9 +4303,7 @@ export default function DDCDirectorStudio() {
                             {entry.songTitle || 'Untitled'} · {entry.sceneCount} scene{entry.sceneCount === 1 ? '' : 's'} · opened {new Date(entry.lastOpened).toLocaleDateString()}
                           </p>
                         </div>
-                        {entry.id !== activeProject.id && (
-                          <button onClick={() => openProject(entry.id)} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded-lg transition flex-shrink-0">Open</button>
-                        )}
+                        <button onClick={() => entry.id === activeProject.id ? setActiveTab('director') : openProject(entry.id)} className="text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white px-3.5 py-2 rounded-lg transition flex-shrink-0">{entry.id === activeProject.id ? 'Enter →' : 'Open'}</button>
                       </div>
                       <div className="flex gap-1.5 mt-2.5">
                         <button onClick={() => { setRenamingId(entry.id); setRenameValue(entry.name); }} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1.5 rounded-lg transition">Rename</button>
