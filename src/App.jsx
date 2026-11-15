@@ -3932,7 +3932,27 @@ export default function DDCDirectorStudio() {
                     </div>
                   </div>
                 )}
-                                <p className="text-[11px] text-slate-500">Lyrics come next — Step 4, after you pick your characters and theme.</p>
+                {audio && (
+                  <div className="space-y-2">
+                    <button
+                      onClick={handleTranscribe}
+                      disabled={isTranscribing}
+                      className="w-full text-sm font-bold bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-3 rounded-xl flex items-center justify-center space-x-2 transition"
+                    >
+                      {isTranscribing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+                      <span>{isTranscribing ? 'Listening to your song…' : 'Extract lyrics from this song'}</span>
+                    </button>
+                    {(isTranscribing || transcribeStatus) && !transcribeError && (
+                      <p className="text-[11px] text-fuchsia-300 font-mono">{transcribeStatus}</p>
+                    )}
+                    {transcribeError && (
+                      <p className="text-xs text-red-400 flex items-center space-x-1.5"><AlertTriangle className="w-3.5 h-3.5" /><span>{transcribeError}</span></p>
+                    )}
+                    {lyricsText && !isTranscribing && (
+                      <button onClick={() => setDirectorStep(4)} className="w-full text-xs font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-3 py-2 rounded-xl transition">See your lyrics + timing →</button>
+                    )}
+                  </div>
+                )}
                 <DirectorContinue next={2}>Continue to characters</DirectorContinue>
               </div>
             )}
