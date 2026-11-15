@@ -648,7 +648,7 @@ export const BUILTIN_CHARACTER_PRESETS = [
     hair: 'Sharp low fade with a clean lineup',
     headwear: '',
     mood: 'confident, cool, unbothered, a little ghetto — street-smart, the one who runs the block',
-    artStyle: 'modern graphic novel comic art, crisp ink linework, cel-shaded dramatic lighting',
+    artStyle: 'gritty street photorealism — a real person, not a cartoon, natural skin texture, realistic proportions',
     wardrobe: 'Black leather jacket over a plain white tee, dark jeans, clean white sneakers',
     accessories: 'Thick gold chain around his neck',
     notes: 'Theme: concrete jungle — city streets, tower blocks, neon at night. The Lead of the Concrete Jungle music video.',
