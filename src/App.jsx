@@ -512,6 +512,7 @@ const CHAR_ALL_FIELDS = ['age', 'gender', 'skinTone', 'build', 'faceShape', 'mar
 const CHARACTER_ROLES = [
   { id: 'star', emoji: '\u{1F31F}', label: 'Lead', desc: 'The protagonist — the video\u2019s main character.' },
   { id: 'colead', emoji: '\u2764\uFE0F', label: 'Co-lead', desc: 'Second lead / love interest — equal partner in the story.' },
+  { id: 'love', emoji: '\u{1F495}', label: 'Love interest', desc: 'The one the lead loves — romance, longing, devotion.' },
   { id: 'confidant', emoji: '\u{1F49C}', label: 'Confidant', desc: 'Loyal best friend, emotional anchor.' },
   { id: 'mentor', emoji: '\u{1F499}', label: 'Mentor', desc: 'Guide / teacher figure.' },
   { id: 'light', emoji: '\u{1F49B}', label: 'Light', desc: 'Warmth, humor, comic relief.' },
@@ -686,16 +687,21 @@ function defaultEnergy(title) {
   return 5;
 }
 
-/* Director wizard steps (simplified 2026-10-21, Lindsey's spec):
-   1 Audio -> 2 Scenes -> 3 Theme -> 4 Images to Create -> 5 Bible (storyboard) -> 6 Videos.
-   Per scene: ONE image prompt (step 4) and ONE video prompt (step 5). Nothing else. */
+/* Director wizard steps (redesigned 2026-11-15, Lindsey's spec):
+   1 Audio -> 2 Characters (she picks) -> 3 Theme + storyline -> 4 Lyrics + timing
+   -> 5 Scenes -> 6 Storyline (image prompts) -> 7 Bible (video prompts)
+   -> 8 Final scenes -> 9 Music Video page.
+   Per scene: ONE image prompt (step 6) and ONE video prompt (step 7). Nothing else. */
 const DIRECTOR_STEPS = [
   { key: 'audio', label: 'Audio' },
-  { key: 'scenes', label: 'Scenes' },
+  { key: 'characters', label: 'Cast' },
   { key: 'theme', label: 'Theme' },
-  { key: 'images', label: 'Images' },
+  { key: 'lyrics', label: 'Lyrics' },
+  { key: 'scenes', label: 'Scenes' },
+  { key: 'storyline', label: 'Storyline' },
   { key: 'bible', label: 'Bible' },
-  { key: 'videos', label: 'Videos' },
+  { key: 'final', label: 'Final' },
+  { key: 'musicvideo', label: 'Video' },
 ];
 
 /* ============================== MAIN COMPONENT ============================== */
@@ -962,7 +968,10 @@ function seedCast() {
 }
 // Normalize a project's cast: 4 portrait slots per member, legacy imageUrl folded in.
 function prepareCast(rawCast) {
-  const arr = Array.isArray(rawCast) && rawCast.length ? rawCast : seedCast();
+  // Seed ONLY for legacy records with no cast field at all (null/undefined).
+  // An explicitly empty array means an intentionally empty cast — she picks
+  // her own people; nobody is picked for her.
+  const arr = Array.isArray(rawCast) ? rawCast : seedCast();
   return arr.map(c => {
     const o = { ...c };
     o.portraits = normalizePortraits(o, `cast:${o.id}`);
@@ -980,7 +989,7 @@ function blankRecord(id, name) {
     project: { title: name, artist: '', intervalSeconds: 15, customSeconds: 20, themeText: '', storylineText: '' },
     lyricsText: '', scenes: [],
     audioSongId: null, audioName: '', audioDuration: 0,
-    cast: withHandles(seedCast()), look: defaultLook(),
+    cast: [], look: defaultLook(),
   };
 }
 function writeIndex(index) {
@@ -1297,7 +1306,7 @@ export default function DDCDirectorStudio() {
     setProject(rec.project);
     setLyricsText('');
     setSegments([]);
-    setCast(prepareCast(null));
+    setCast([]); // new projects start with an empty cast — she picks her own people
     setLook(defaultLook());
     setAudioMeta({ songId: null, name: '', duration: 0 });
     setSelectedSceneIndex(0);
@@ -1464,14 +1473,14 @@ export default function DDCDirectorStudio() {
     delete copy.imageUrl;
     return copy;
   };
+  // Adding someone to the cast NEVER touches scenes — she picks per-scene
+  // cast herself with the cast chips. (No auto-add to "all" scenes.)
   const addPresetToCast = async (preset) => {
     if (cast.some(c => c.presetId === preset.id)) return;
     const copy = await clonePresetForCast(preset);
     const nextCast = [...cast, copy];
-    const nextSegs = segsWithNewCastMember(segments, cast.map(c => c.id), copy.id);
     setCast(nextCast);
-    setSegments(nextSegs);
-    writeActiveProject(project, lyricsText, nextSegs, nextCast, null, null);
+    writeActiveProject(project, lyricsText, segments, nextCast, null, null);
   };
   const setVariantCastPortraits = (charId, vid, slots) => {
     const next = cast.map(c => c.id === charId
@@ -1479,16 +1488,8 @@ export default function DDCDirectorStudio() {
       : c);
     writeCast(next);
   };
-  // New cast member: scenes that were on "all" (castIds exactly the old full cast,
-  // or missing) gain the newcomer; scenes with a custom subset stay untouched.
-  const segsWithNewCastMember = (segs, oldIds, newId) =>
-    segs.map(s => {
-      const cur = Array.isArray(s.castIds) ? s.castIds : oldIds;
-      const isAll = cur.length === oldIds.length && oldIds.every(id => cur.includes(id));
-      return isAll ? { ...s, castIds: [...cur, newId] } : s;
-    });
   const removeFromCast = (charId) => {
-    if (cast.length <= 1) return;
+    if (!cast.length) return;
     if (!window.confirm('Remove this character from this project?')) return;
     const doomed = cast.find(c => c.id === charId);
     if (doomed) deleteCharBlobs(doomed, `cast:${charId}`);
@@ -1498,7 +1499,7 @@ export default function DDCDirectorStudio() {
     const nextSegs = segments.map(s => Array.isArray(s.castIds)
       ? { ...s, castIds: s.castIds.filter(id => id !== charId) }
       : s);
-    const l = look.characterId === charId ? { ...look, characterId: next[0].id } : look;
+    const l = look.characterId === charId ? { ...look, characterId: next.length ? next[0].id : '' } : look;
     setCast(next);
     setSegments(nextSegs);
     setLook(l);
@@ -1734,31 +1735,59 @@ export default function DDCDirectorStudio() {
     });
     return `Characters: ${parts.join(' · ')}`;
   };
-  /* Searchable cast picker list: full library minus cast members, filtered by query. */
+  /* Searchable cast picker list: the WHOLE library, filtered by query.
+     Cast members are NOT hidden — the row shows who is already in this
+     project's cast (with their role) vs who is not in it yet. */
   const castPickerList = (() => {
     const q = (castSearch || '').trim().toLowerCase();
     return characterPresets.filter(p => {
-      if (cast.some(c => c.presetId === p.id)) return false;
       if (!q) return true;
       return ((p.name || '') + ' ' + (p.handle || '')).toLowerCase().includes(q);
     });
   })();
-  // "Use" drops the preset into the open project's cast and makes it the star.
+  // One library row for the cast pickers (Director Step 2 + Assets tab):
+  // not in the cast yet -> Add button; already in -> "In this video" marker
+  // with the role badge and a role picker, so she can see who she is using.
+  const renderCastPickerRow = (p) => {
+    const inCast = cast.find(c => c.presetId === p.id);
+    return (
+      <div key={p.id} className="bg-slate-950/60 border border-slate-800 rounded-xl p-2 space-y-2">
+        <div className="flex items-center gap-2">
+          {charThumbUrl(p) ? (
+            <img src={charThumbUrl(p)} alt={p.name} className="w-10 h-12 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
+          ) : (
+            <div className="w-10 h-12 rounded-lg bg-slate-800 border border-slate-700 flex-shrink-0" />
+          )}
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-bold text-white truncate">{p.name}</p>
+            <p className="text-[10px] text-slate-500 truncate">{charBlurb(p)}</p>
+          </div>
+          {inCast ? (
+            <span className="text-[9px] font-bold bg-emerald-950 text-emerald-300 px-2 py-1 rounded border border-emerald-800 flex-shrink-0">In this video ✓</span>
+          ) : (
+            <button onClick={() => addPresetToCast(p)} className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1.5 rounded-lg transition flex-shrink-0">Add</button>
+          )}
+        </div>
+        {inCast && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <RoleBadge role={inCast.role} />
+            <span className="text-[9px] uppercase font-bold text-slate-500">Role:</span>
+            <RolePicker value={inCast.role} onPick={(r) => setCastRole(inCast.id, r)} />
+          </div>
+        )}
+      </div>
+    );
+  };
+  // "Use" drops the preset into the open project's cast — with NO role
+  // forced and NO scenes touched. She picks the role on the row afterwards.
   const usePreset = async (preset) => {
     let c = cast.find(x => x.presetId === preset.id);
-    let nextCast = cast;
-    let nextSegs = segments;
     if (!c) {
       c = await clonePresetForCast(preset);
-      nextCast = [...cast, c];
-      nextSegs = segsWithNewCastMember(segments, cast.map(x => x.id), c.id);
+      const nextCast = [...cast, c];
+      setCast(nextCast);
+      writeActiveProject(project, lyricsText, segments, nextCast, null, null);
     }
-    nextCast = nextCast.map(x => x.id === c.id ? { ...x, role: 'star' } : (x.role === 'star' ? { ...x, role: '' } : x));
-    const l = { ...look, characterId: c.id };
-    setCast(nextCast);
-    setSegments(nextSegs);
-    setLook(l);
-    writeActiveProject(project, lyricsText, nextSegs, nextCast, l, null);
   };
   /* ------------------------- saved looks (global style presets) ------------------------- */
   const saveCurrentLook = () => {
@@ -1808,6 +1837,7 @@ export default function DDCDirectorStudio() {
   const ROLE_BEATS = {
     star: 'performs at center frame',
     colead: 'moves in sync with the lead, close beside them',
+    love: 'stays close to the lead, sharing the frame, eyes on them',
     confidant: 'stays near the lead, reacting with quiet intensity',
     mentor: 'observes with calm authority, gesturing guidance',
     light: 'moves playfully at the edge of frame, bringing levity',
@@ -1894,7 +1924,7 @@ export default function DDCDirectorStudio() {
     }
     lines.push('');
     lines.push(`SCENE: ${bg}${lyric ? ` — mood of the lyric: "${lyric}"` : ''}.`);
-    lines.push(`ENVIRONMENT: Foreground: ${scene.envFG || '—'}. Midground: ${scene.envMG || '—'}. Background: ${bg}. Props and details: ${scene.envProps || '—'}.`);
+    lines.push(`ENVIRONMENT: Foreground: ${scene.envFG || '—'}. Midground: ${scene.envMG || '—'}. Background: ${bg}${scene.backgroundImageName ? ` (background image "${scene.backgroundImageName}" — match this image's background)` : ''}. Props and details: ${scene.envProps || '—'}.`);
     lines.push(`CAMERA: ${scene.shotType || 'Motion clip'} shot, ${scene.cameraAngle} angle, ${scene.cameraMovement} perspective, vertical 9:16 framing, cinematic lens, sharp focus on the subjects with soft depth of field.`);
     lines.push(`LIGHTING: ${scene.lightingMood}; soft directional source, gentle shadows, luminous highlights.`);
     lines.push(`COLOR & MOOD: palette ${lockedPalette.hexes.join(', ')}${lockedPalette.mood ? `, ${lockedPalette.mood}` : ''}${lyric ? `; emotional tone of "${lyric}"` : ''}.`);
@@ -2112,6 +2142,8 @@ export default function DDCDirectorStudio() {
         approvedPrompt: (p && p.approvedPrompt) || '',
         keyframeImageUrl: (p && p.keyframeImageUrl) || null,
         imageName: (p && p.imageName) || '',
+        backgroundImageUrl: (p && p.backgroundImageUrl) || null,
+        backgroundImageName: (p && p.backgroundImageName) || '',
         reviewStatus: (p && p.reviewStatus) || 'pending',
         brollPrompt: (p && p.brollPrompt) || '',
         lipsyncPrompt: (p && p.lipsyncPrompt) || '',
@@ -2332,6 +2364,8 @@ export default function DDCDirectorStudio() {
       approvedPrompt: '',
       keyframeImageUrl: null,
       imageName: '',
+      backgroundImageUrl: null,
+      backgroundImageName: '',
       reviewStatus: 'pending',
       brollPrompt: '',
       lipsyncPrompt: '',
@@ -2427,7 +2461,7 @@ export default function DDCDirectorStudio() {
   // Insert a built-in paired (two-person) shot as a pre-filled scene at the
   // end of the list. Both characters join this project's cast if they
   // aren't in it yet, and the shot's image + video prompts are stored
-  // verbatim, so Images to Create and the Bible show them exactly as written.
+  // verbatim, so Storyline and the Bible show them exactly as written.
   const insertPairedShot = async (shot) => {
     const iv = Math.max(1, currentInterval() || 15);
     const dur = audio && typeof audio.duration === 'number' ? audio.duration : null;
@@ -2438,20 +2472,20 @@ export default function DDCDirectorStudio() {
     if (dur != null) end = Math.min(end, dur);
     if (!(end > start)) return; // guard: no room left in the song
     // Make sure both characters are in this project's cast.
+    // (Existing scenes are NOT touched — the paired characters go only on the
+    // new paired scene, via castIds below.)
     let nextCast = cast;
-    let nextSegs = segments;
     for (const pid of shot.presetIds) {
       const preset = BUILTIN_CHARACTER_PRESETS.find(p => p.id === pid);
       if (!preset) continue;
       if (nextCast.some(c => c.presetId === preset.id)) continue;
       const copy = await clonePresetForCast(preset);
-      nextSegs = segsWithNewCastMember(nextSegs, nextCast.map(c => c.id), copy.id);
       nextCast = [...nextCast, copy];
     }
     const pairIds = nextCast.filter(c => shot.presetIds.includes(c.presetId)).map(c => c.id);
-    const idx = nextSegs.length;
+    const idx = segments.length;
     const fresh = {
-      ...makeSceneShell(idx, nextSegs.length + 1, start, end),
+      ...makeSceneShell(idx, segments.length + 1, start, end),
       title: shot.title,
       lyrics: shot.lyrics || '',
       shotType: 'Motion clip',
@@ -2470,7 +2504,7 @@ export default function DDCDirectorStudio() {
       videoPrompt: shot.videoPrompt,
       castIds: pairIds.length ? pairIds : nextCast.map(c => c.id),
     };
-    const finalSegs = renumberScenes([...nextSegs, fresh]);
+    const finalSegs = renumberScenes([...segments, fresh]);
     setCast(nextCast);
     setSegments(finalSegs);
     setSelectedSceneIndex(idx);
@@ -2507,7 +2541,7 @@ export default function DDCDirectorStudio() {
     return `Song: "${project.title}"${project.artist ? ` by ${project.artist}` : ''}. Duration: ${audio ? fmtClock(audio.duration) : 'unknown'}. ${segments.length} scenes.\n\nTimestamped lyrics:\n${sceneList}\n\n${castBlock}\n\nLocked look for reference — style: ${lockedStyle.name} (${lockedStyle.descriptor}); palette: ${lockedPalette.name} (${lockedPalette.mood}); lead character: ${describeChar(lockedChar)}; world: ${lockedTheme.name} (${lockedTheme.notes}).`;
   };
   const handleGenerateThemeOnly = async () => {
-    if (!segments.length) { setThemeError('Slice your song into intervals first (Step 2).'); return; }
+    if (!segments.length) { setThemeError('Slice your song into intervals first (Step 5).'); return; }
     setIsGeneratingTheme(true);
     setThemeError('');
     try {
@@ -2529,7 +2563,7 @@ export default function DDCDirectorStudio() {
     }
   };
   const handleGenerateStoryline = async () => {
-    if (!segments.length) { setStorylineError('Slice your song into intervals first (Step 2).'); return; }
+    if (!segments.length) { setStorylineError('Slice your song into intervals first (Step 5).'); return; }
     setIsGeneratingStoryline(true);
     setStorylineError('');
     try {
@@ -2717,7 +2751,7 @@ export default function DDCDirectorStudio() {
   const sceneTag = (s) => `Scene ${s.sceneNumber} — ${s.title}`;
 
   // Shared section-label editor (same select + custom-text control), used in
-  // Director Step 3 and the Timeline Time Slices.
+  // Director Step 5 (Scenes) and the Timeline Time Slices.
   const renderSectionLabelEditor = (index, s) => {
     const inList = SECTION_LABELS.includes(s.title);
     return (
@@ -2760,6 +2794,61 @@ export default function DDCDirectorStudio() {
 
   // Shared per-scene lyrics editor. Editing locks the scene so "Distribute lines
   // across scenes" and re-slices never overwrite her fix; Re-sync hands it back.
+  // Lyrics ↔ timing layout (Step 4): every lyric line/section against its
+  // time in the song, so lip sync scenes can be lined up word-for-word.
+  // Timestamped lines ([mm:ss] in pasted/transcribed lyrics) show their exact
+  // time; other lines show under their scene's time range.
+  const renderLyricTimingLayout = () => {
+    if (!segments.length) return (
+      <p className="text-xs text-slate-500 bg-slate-950/60 border border-slate-800 rounded-xl p-3 text-center">
+        No scenes yet — upload your song in Step 1 first.
+      </p>
+    );
+    const parsed = lyricLinesOf(lyricsText).map((l) => {
+      const m = l.match(/\[(\d{1,3}:\d{2}(?:\.\d)?)\]/);
+      return { text: l.replace(/\[\d{1,3}:\d{2}(?:\.\d)?\]/g, '').trim(), t: m ? tsToSec(m[1]) : null };
+    }).filter(pl => pl.text);
+    const timedByScene = segments.map(() => []);
+    parsed.forEach((pl) => {
+      if (pl.t == null) return;
+      let idx = segments.findIndex(sg => pl.t >= sg.startTime && pl.t < sg.endTime);
+      if (idx < 0) { let best = 0; for (let i = 0; i < segments.length; i++) if (segments[i].startTime <= pl.t) best = i; idx = best; }
+      timedByScene[idx].push(pl);
+    });
+    return (
+      <div className="space-y-2">
+        <label className="text-[10px] uppercase font-bold text-slate-400">Lyrics against timing <span className="text-slate-600 normal-case">(for lip syncing scenes)</span></label>
+        <div className="space-y-1.5 max-h-80 overflow-y-auto pr-1">
+          {segments.map((sg, i) => {
+            const timed = timedByScene[i];
+            return (
+              <div key={sg.id} className="bg-slate-950/60 border border-slate-800 rounded-xl p-2.5 space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] font-black text-slate-300">{sceneTag(sg)}</span>
+                  <span className="text-[11px] font-mono text-cyan-400">{fmtClock(sg.startTime)}–{fmtClock(sg.endTime)}</span>
+                  <SectionBadge title={sg.title} />
+                  {sg.lipSyncEnabled && (
+                    <span className="text-[9px] font-bold bg-fuchsia-950 text-fuchsia-300 px-1.5 py-0.5 rounded border border-fuchsia-800">LIP SYNC</span>
+                  )}
+                </div>
+                {timed.length > 0 ? (
+                  <div className="space-y-0.5">
+                    {timed.map((pl, j) => (
+                      <p key={j} className="text-[11px] text-slate-300"><span className="font-mono text-fuchsia-300">{fmtClock(pl.t)}</span> <span className="text-slate-600">·</span> {pl.text}</p>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-slate-300 italic">"{sg.lyrics}"</p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <p className="text-[10px] text-slate-600">Tip: lines with a [mm:ss] stamp in your lyrics show their exact time here — transcribed lyrics come stamped automatically.</p>
+      </div>
+    );
+  };
+
   const renderLyricsEditor = (index, s) => (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
@@ -2963,6 +3052,63 @@ export default function DDCDirectorStudio() {
       await idbImgPut({ id: `${activeProject.id}:${scene.id}`, blob: file, name: file.name || '', addedAt: Date.now() });
     } catch (e) { /* storage unavailable — image works in-session only */ }
   };
+  // Per-scene BACKGROUND image (Step 5 slot; named in the Step 6 image prompt): the picture she adds for
+  // the scene's background. Stored beside the keyframe still, under a :bg key,
+  // and named in the scene's image prompt so the generator matches it.
+  const handleBackgroundImageUpload = async (index, file) => {
+    if (!file) return;
+    const scene = segments[index];
+    if (!scene) return;
+    if (scene.backgroundImageUrl && String(scene.backgroundImageUrl).startsWith('blob:')) {
+      try { URL.revokeObjectURL(scene.backgroundImageUrl); } catch (e) {}
+    }
+    const url = URL.createObjectURL(file);
+    updateScene(index, { backgroundImageUrl: url, backgroundImageName: file.name || 'background image' });
+    try {
+      await idbImgPut({ id: `${activeProject.id}:${scene.id}:bg`, blob: file, name: file.name || '', addedAt: Date.now() });
+    } catch (e) { /* storage unavailable — image works in-session only */ }
+  };
+  const removeBackgroundImage = async (index) => {
+    const scene = segments[index];
+    if (!scene) return;
+    if (scene.backgroundImageUrl && String(scene.backgroundImageUrl).startsWith('blob:')) {
+      try { URL.revokeObjectURL(scene.backgroundImageUrl); } catch (e) {}
+    }
+    updateScene(index, { backgroundImageUrl: null, backgroundImageName: '' });
+    try { await idbImgDelete(`${activeProject.id}:${scene.id}:bg`); } catch (e) {}
+  };
+  // Upload slot for a scene's background image (Step 5 scene cards).
+  const renderSceneBackgroundImage = (index, s) => (
+    <div className="space-y-1.5">
+      <span className="text-[10px] uppercase font-bold text-slate-500">Background image <span className="text-slate-600 normal-case">(feeds this scene's image prompt)</span></span>
+      <div className="flex items-center gap-3 bg-slate-950/60 border border-slate-800 rounded-xl p-2.5">
+        <div className="w-14 flex-shrink-0">
+          {s.backgroundImageUrl ? (
+            <img src={s.backgroundImageUrl} alt={'Background for scene ' + s.sceneNumber} className="w-full aspect-[9/16] object-cover rounded-lg border border-amber-700" />
+          ) : (
+            <div className="w-full aspect-[9/16] rounded-lg border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
+              <span className="text-[8px] text-slate-600 text-center px-1">No background yet</span>
+            </div>
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-[10px] font-bold text-slate-300">{s.backgroundImageUrl ? '✓ Background image set' : 'Add a background image for this scene'}</p>
+          {s.backgroundImageName ? <p className="text-[10px] text-slate-500 truncate">{s.backgroundImageName}</p> : null}
+          <div className="flex gap-2 mt-1.5">
+            <label className="cursor-pointer text-[10px] font-bold bg-amber-600/30 hover:bg-amber-600/50 border border-amber-500/40 text-amber-300 px-2.5 py-1.5 rounded-lg flex items-center space-x-1 transition">
+              <Upload className="w-3 h-3" /><span>{s.backgroundImageUrl ? 'Replace' : 'Upload background'}</span>
+              <input type="file" accept="image/*" className="hidden" onChange={(e) => { handleBackgroundImageUpload(index, e.target.files && e.target.files[0]); e.target.value = ''; }} />
+            </label>
+            {s.backgroundImageUrl && (
+              <button onClick={() => removeBackgroundImage(index)} className="text-[10px] text-slate-400 hover:text-red-400 flex items-center space-x-1">
+                <Trash2 className="w-3 h-3" /><span>Remove</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
   const removeSceneImage = async (index) => {
     const scene = segments[index];
     if (!scene) return;
@@ -2977,18 +3123,31 @@ export default function DDCDirectorStudio() {
   const hydrateSceneImages = async (projectId, scenes) => {
     let changed = false;
     const next = await Promise.all(scenes.map(async (s) => {
+      let out = { ...s };
       try {
         const rec = await idbImgGet(`${projectId}:${s.id}`);
         if (rec && rec.blob) {
           changed = true;
-          return { ...s, keyframeImageUrl: URL.createObjectURL(rec.blob), imageName: rec.name || s.imageName || '' };
+          out = { ...out, keyframeImageUrl: URL.createObjectURL(rec.blob), imageName: rec.name || s.imageName || '' };
         }
       } catch (e) { /* fall through */ }
-      if (s.keyframeImageUrl && String(s.keyframeImageUrl).startsWith('blob:')) {
+      if (out.keyframeImageUrl && String(out.keyframeImageUrl).startsWith('blob:') && out.keyframeImageUrl === s.keyframeImageUrl) {
+        // Blob URL from a previous session is dead with no stored blob behind it.
         changed = true;
-        return { ...s, keyframeImageUrl: null, imageName: '' };
+        out = { ...out, keyframeImageUrl: null, imageName: '' };
       }
-      return s;
+      try {
+        const bg = await idbImgGet(`${projectId}:${s.id}:bg`);
+        if (bg && bg.blob) {
+          changed = true;
+          out = { ...out, backgroundImageUrl: URL.createObjectURL(bg.blob), backgroundImageName: bg.name || s.backgroundImageName || '' };
+        }
+      } catch (e) { /* fall through */ }
+      if (out.backgroundImageUrl && String(out.backgroundImageUrl).startsWith('blob:') && out.backgroundImageUrl === s.backgroundImageUrl) {
+        changed = true;
+        out = { ...out, backgroundImageUrl: null, backgroundImageName: '' };
+      }
+      return out;
     }));
     return changed ? next : scenes;
   };
@@ -3139,11 +3298,13 @@ export default function DDCDirectorStudio() {
   /* ------------------------- Director wizard: unlock rules ------------------------- */
   const hasTheme = (project.themeText || '').trim().length > 0 || (project.storylineText || '').trim().length > 0;
   const directorUnlocked = (step) => {
-    if (step <= 1) return true;
-    if (step === 2) return !!audio;
-    if (step === 3) return segments.length > 0;
-    if (step === 6) return segments.length > 0 && !!audio;
-    return hasTheme; // steps 4-5: Images to Create, Bible
+    if (step <= 1) return true; // 1 Audio
+    if (step >= 2 && step <= 5) return !!audio; // 2 Cast, 3 Theme, 4 Lyrics, 5 Scenes
+    if (step === 6) return segments.length > 0 && !!audio && hasTheme; // 6 Storyline (image prompts)
+    if (step === 7) return hasTheme; // 7 Bible
+    if (step === 8) return segments.length > 0 && !!audio; // 8 Final scenes
+    if (step === 9) return !!audio; // 9 Music Video page
+    return false;
   };
   const maxDirectorStep = DIRECTOR_STEPS.map((_, i) => i + 1).filter(directorUnlocked).length;
   const shownDirectorStep = Math.min(directorStep, Math.max(1, maxDirectorStep));
@@ -3771,58 +3932,73 @@ export default function DDCDirectorStudio() {
                     </div>
                   </div>
                 )}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[10px] uppercase font-bold text-slate-400">Lyrics</label>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={handleTranscribe}
-                        disabled={isTranscribing || !audio}
-                        className="text-xs font-bold bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-lg flex items-center space-x-1.5 transition"
-                      >
-                        {isTranscribing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
-                        <span>{isTranscribing ? 'Transcribing…' : 'Auto-transcribe (free)'}</span>
-                      </button>
-                      <a
-                        href={COLAB_TRANSCRIBE_URL}
-                        target="_blank" rel="noreferrer"
-                        className="text-[11px] text-emerald-400 hover:text-emerald-300 underline"
-                      >
-                        Faster: free Colab GPU ↗
-                      </a>
-                    </div>
-                  </div>
-                  {(isTranscribing || transcribeStatus) && !transcribeError && (
-                    <p className="text-[11px] text-fuchsia-300 font-mono">{transcribeStatus}</p>
-                  )}
-                  {transcribeError && (
-                    <p className="text-xs text-red-400 flex items-center space-x-1.5"><AlertTriangle className="w-3.5 h-3.5" /><span>{transcribeError}</span></p>
-                  )}
-                  {isTranscribing && (
-                    <button onClick={() => { transcribeCancelRef.current = true; }} className="text-[11px] text-slate-400 hover:text-slate-200 underline">
-                      Cancel transcription
-                    </button>
-                  )}
-                  {!isTranscribing && !transcribeStatus && (
-                    <p className="text-[10px] text-slate-500">Runs on your device — free, no key. A full song takes a few minutes on a phone.</p>
-                  )}
-                  <textarea
-                    rows={5}
-                    value={lyricsText}
-                    onChange={(e) => { setLyricsText(e.target.value); persist(project, e.target.value, segments); }}
-                    placeholder={'Paste your lyrics here — one line per line.\n[00:10] Timestamps like this are fine too.'}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-fuchsia-500"
-                  />
-                </div>
-                <DirectorContinue next={2}>Continue to scenes</DirectorContinue>
+                                <p className="text-[11px] text-slate-500">Lyrics come next — Step 4, after you pick your characters and theme.</p>
+                <DirectorContinue next={2}>Continue to characters</DirectorContinue>
               </div>
             )}
 
-            {/* STEP 2 — Timestamped intervals */}
+            {/* STEP 2 — Characters (you pick who is in this video) */}
             {shownDirectorStep === 2 && (
               <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-4 shadow-lg">
                 <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-                  <Clock className="w-4 h-4 text-cyan-400" /><span>Step 2 — Scenes (times + sections)</span>
+                  <Users className="w-4 h-4 text-cyan-400" /><span>Step 2 — Characters (pick your people)</span>
+                </h2>
+                <p className="text-[11px] text-slate-400">Nobody is picked for you — add who you want from your library, then give each one a role. Tap a role emoji to change it.</p>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] uppercase font-bold text-slate-400">In this video ({cast.length})</label>
+                    <button onClick={() => setActiveTab('characters')} className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-cyan-300 px-2.5 py-1.5 rounded-lg transition">New character →</button>
+                  </div>
+                  {!cast.length && (
+                    <p className="text-xs text-slate-500 bg-slate-950/60 border border-slate-800 rounded-xl p-3">No one in this video yet — pick from your library below.</p>
+                  )}
+                  <div className="space-y-2">
+                    {cast.map((char, ci) => (
+                      <div key={char.id} className="flex items-center gap-2 bg-slate-950/60 border border-slate-800 rounded-xl p-2">
+                        {charThumbUrl(char) ? (
+                          <img src={charThumbUrl(char)} alt={char.name} className="w-10 h-12 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
+                        ) : (
+                          <div className="w-10 h-12 rounded-lg bg-slate-800 border border-slate-700 flex-shrink-0" />
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-[9px] font-black bg-cyan-600 text-white px-1.5 py-0.5 rounded">Character {ci + 1}</span>
+                            <p className="text-xs font-bold text-white truncate">{char.name}</p>
+                            <RoleBadge role={char.role} />
+                          </div>
+                          <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                            <span className="text-[9px] uppercase font-bold text-slate-500">Role:</span>
+                            <RolePicker value={char.role} onPick={(r) => setCastRole(char.id, r)} />
+                          </div>
+                        </div>
+                        <button onClick={() => removeFromCast(char.id)} className="text-[10px] bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-300 px-2 py-1.5 rounded-lg transition flex-shrink-0">Remove</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-[10px] uppercase font-bold text-slate-400">Your library — tap Add to bring someone in</label>
+                  <input
+                    type="text" value={castSearch} onChange={(e) => setCastSearch(e.target.value)}
+                    placeholder="Search the library — name or @handle…"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
+                  />
+                  <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                    {castPickerList.map(p => renderCastPickerRow(p))}
+                    {castPickerList.length === 0 && (
+                      <p className="text-[10px] text-slate-500">{castSearch ? `No matches for "${castSearch}".` : 'No characters in the library yet. Make one on the Characters tab.'}</p>
+                    )}
+                  </div>
+                </div>
+                <DirectorContinue next={3}>Continue to theme</DirectorContinue>
+              </div>
+            )}
+
+            {/* STEP 5 — Timestamped intervals */}
+            {shownDirectorStep === 5 && (
+              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-4 shadow-lg">
+                <h2 className="text-sm font-bold text-white flex items-center space-x-2">
+                  <Clock className="w-4 h-4 text-cyan-400" /><span>Step 5 — Scenes (times + sections)</span>
                 </h2>
                 <div className="flex flex-wrap items-center gap-2">
                   {[10, 15, 20, 30].map((sec) => (
@@ -3878,12 +4054,13 @@ export default function DDCDirectorStudio() {
                       {renderSectionLabelEditor(i, s)}
                       {renderLyricsEditor(i, s)}
                       {renderSceneBackgroundEditor(i, s)}
+                      {renderSceneBackgroundImage(i, s)}
                       {renderSceneCastChips(i, s)}
                     </div>
                   ))}
                 </div>
                 {renderAddSceneButton()}
-                <DirectorContinue next={3}>Continue to theme</DirectorContinue>
+                <DirectorContinue next={6}>Continue to Storyline</DirectorContinue>
               </div>
             )}
 
@@ -3938,17 +4115,79 @@ export default function DDCDirectorStudio() {
                   />
                 </div>
                 <p className="text-[10px] text-slate-500">AI-drafted, free via Pollinations — rewrite anything. This guides every prompt and the Bible.</p>
-                <DirectorContinue next={4}>Continue to Images to Create</DirectorContinue>
+                <DirectorContinue next={4}>Continue to lyrics</DirectorContinue>
               </div>
             )}
 
-            {/* STEP 4 — Image prompts (prompt-only: copy into your image generator) */}
+            {/* STEP 4 — Lyrics + timing (for lip syncing scenes) */}
             {shownDirectorStep === 4 && (
+              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-4 shadow-lg">
+                <h2 className="text-sm font-bold text-white flex items-center space-x-2">
+                  <Mic className="w-4 h-4 text-fuchsia-400" /><span>Step 4 — Lyrics + timing</span>
+                </h2>
+                <p className="text-[11px] text-slate-400">Extract the lyrics, then check each line against its time in the song — this layout is for your lip syncing scenes.</p>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] uppercase font-bold text-slate-400">Lyrics</label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={handleTranscribe}
+                        disabled={isTranscribing || !audio}
+                        className="text-xs font-bold bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-lg flex items-center space-x-1.5 transition"
+                      >
+                        {isTranscribing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
+                        <span>{isTranscribing ? 'Transcribing…' : 'Auto-transcribe (free)'}</span>
+                      </button>
+                      <a
+                        href={COLAB_TRANSCRIBE_URL}
+                        target="_blank" rel="noreferrer"
+                        className="text-[11px] text-emerald-400 hover:text-emerald-300 underline"
+                      >
+                        Faster: free Colab GPU ↗
+                      </a>
+                    </div>
+                  </div>
+                  {(isTranscribing || transcribeStatus) && !transcribeError && (
+                    <p className="text-[11px] text-fuchsia-300 font-mono">{transcribeStatus}</p>
+                  )}
+                  {transcribeError && (
+                    <p className="text-xs text-red-400 flex items-center space-x-1.5"><AlertTriangle className="w-3.5 h-3.5" /><span>{transcribeError}</span></p>
+                  )}
+                  {isTranscribing && (
+                    <button onClick={() => { transcribeCancelRef.current = true; }} className="text-[11px] text-slate-400 hover:text-slate-200 underline">
+                      Cancel transcription
+                    </button>
+                  )}
+                  {!isTranscribing && !transcribeStatus && (
+                    <p className="text-[10px] text-slate-500">Runs on your device — free, no key. A full song takes a few minutes on a phone.</p>
+                  )}
+                  <textarea
+                    rows={5}
+                    value={lyricsText}
+                    onChange={(e) => { setLyricsText(e.target.value); persist(project, e.target.value, segments); }}
+                    placeholder={'Paste your lyrics here — one line per line.\n[00:10] Timestamps like this are fine too.'}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 font-mono focus:outline-none focus:border-fuchsia-500"
+                  />
+                  <button
+                    onClick={distributeLyrics}
+                    disabled={!audio}
+                    className="text-xs font-bold bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 px-3 py-2 rounded-lg transition"
+                  >
+                    Distribute lines across scenes
+                  </button>
+                </div>
+                {renderLyricTimingLayout()}
+                <DirectorContinue next={5}>Continue to scenes</DirectorContinue>
+              </div>
+            )}
+
+            {/* STEP 6 — Storyline: image prompts (prompt-only: copy into your image generator) */}
+            {shownDirectorStep === 6 && (
               <div className="space-y-4">
                 <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg flex items-center justify-between flex-wrap gap-3">
                   <div>
                     <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-                      <Sparkles className="w-4 h-4 text-emerald-400" /><span>Step 4 — Images to Create</span>
+                      <Sparkles className="w-4 h-4 text-emerald-400" /><span>Step 6 — Storyline (image prompts)</span>
                     </h2>
                     <p className="text-[10px] text-slate-500 mt-1">One image prompt per scene, in your full template — each one particular to its scene's cast, action, lyric, and lighting. Copy it, make the image in your image generator, then upload it right here in the same card. <span className="text-amber-300 font-bold">Important: in your image generator, load your character reference image too — text alone makes a generic woman/man, it cannot know your character's face.</span></p>
                   </div>
@@ -4007,6 +4246,9 @@ export default function DDCDirectorStudio() {
                         </div>
                       </div>
                     </div>
+                    {s.backgroundImageUrl && (
+                      <p className="text-[10px] text-amber-300 bg-amber-950/40 border border-amber-800/50 rounded-lg px-2.5 py-1.5">Background image set: "{s.backgroundImageName}" — named in this scene's image prompt, so the generator matches it.</p>
+                    )}
                     {renderSceneCastChips(i, s)}
                     <details className="bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2">
                       <summary className="text-[10px] font-bold text-slate-400 cursor-pointer select-none">Environment layers <span className="text-slate-600 font-normal">— foreground / midground / background / props</span></summary>
@@ -4083,17 +4325,17 @@ export default function DDCDirectorStudio() {
                     No scenes yet — start at Step 1 with your song.
                   </p>
                 )}
-                <DirectorContinue next={5}>Continue to the Bible</DirectorContinue>
+                <DirectorContinue next={7}>Continue to the Bible</DirectorContinue>
               </div>
             )}
 
-            {/* STEP 5 — The Bible: image, then prompt, per scene */}
-            {shownDirectorStep === 5 && (
+            {/* STEP 7 — The Bible: image, then prompt, per scene */}
+            {shownDirectorStep === 7 && (
               <div className="space-y-4">
                 <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg flex items-center justify-between flex-wrap gap-3">
                   <div>
                     <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-                      <BookOpen className="w-4 h-4 text-indigo-400" /><span>Step 5 — Bible (Storyboard)</span>
+                      <BookOpen className="w-4 h-4 text-indigo-400" /><span>Step 7 — Bible (Storyboard)</span>
                     </h2>
                     <p className="text-[10px] text-slate-500 mt-1">Your storyboard: each scene's image with its ONE video prompt — copy the pair straight into your video generator.</p>
                   </div>
@@ -4134,7 +4376,7 @@ export default function DDCDirectorStudio() {
                         <img src={s.keyframeImageUrl} alt={'Scene ' + s.sceneNumber + ' visual'} className="w-full aspect-[9/16] object-cover rounded-xl border border-slate-700" />
                       ) : (
                         <div className="w-full aspect-[9/16] rounded-xl border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center">
-                          <span className="text-[9px] text-slate-600 text-center px-2">No image — upload it in Images to Create</span>
+                          <span className="text-[9px] text-slate-600 text-center px-2">No image yet — add it on the Storyline page</span>
                         </div>
                       )}
                     </div>
@@ -4193,19 +4435,19 @@ export default function DDCDirectorStudio() {
                     No scenes yet — start at Step 1 with your song.
                   </p>
                 )}
-                <DirectorContinue next={6}>Continue to Videos</DirectorContinue>
+                <DirectorContinue next={8}>Continue to Final scenes</DirectorContinue>
               </div>
             )}
 
-            {/* STEP 6 — Finished video */}
-            {shownDirectorStep === 6 && (
+            {/* STEP 8 — Final scenes (finished clips, in order) */}
+            {shownDirectorStep === 8 && (
               <div className="space-y-4">
                 <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg">
                   <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-                    <Clapperboard className="w-4 h-4 text-cyan-400" /><span>Step 6 — Videos</span>
+                    <Clapperboard className="w-4 h-4 text-cyan-400" /><span>Step 8 — Final scenes</span>
                   </h2>
                   <p className="text-[10px] text-slate-500 mt-1">
-                    Plug in all the videos you made — one clip per scene, in order. Each clip is auto-placed at its scene timestamp, trimmed or looped to fill the interval, then your song is mixed underneath.
+                    One slot per scene, in order — put each finished clip where its scene goes. Each clip is auto-placed at its scene timestamp, trimmed or looped to fill the interval, then your song is mixed underneath.
                   </p>
                 </div>
                 {segments.map((s, i) => {
@@ -4259,6 +4501,141 @@ export default function DDCDirectorStudio() {
                   <DownloadCloud className="w-4 h-4" /><span>Export finished MP4</span>
                 </button>
                 <p className="text-[10px] text-slate-500 text-center">Clips and your song live in memory — re-attach them after a reload before exporting.</p>
+                <button
+                  onClick={() => setDirectorStep(9)}
+                  disabled={!audio}
+                  className="w-full text-sm font-bold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-4 py-3 rounded-xl transition flex items-center justify-center space-x-2"
+                >
+                  <MonitorPlay className="w-4 h-4" /><span>Open the Music Video page</span>
+                </button>
+              </div>
+            )}
+
+            {/* STEP 9 — Music Video page (the finished video) */}
+            {shownDirectorStep === 9 && (
+              <div className="space-y-4">
+                <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg">
+                  <h2 className="text-sm font-bold text-white flex items-center space-x-2">
+                    <MonitorPlay className="w-4 h-4 text-indigo-400" /><span>Step 9 — Music Video</span>
+                  </h2>
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    The finished video — your song, scenes in correct order, captions on screen. Watch it here, then export the MP4.
+                  </p>
+                </div>
+
+                {/* 9:16 finished-video player — same stage as Preview Assembly */}
+                <div className="relative w-full max-w-md mx-auto aspect-[9/16] bg-black overflow-hidden flex items-center justify-center rounded-2xl border border-slate-800">
+                  {activeAssemblySegment && (activeAssemblySegment.clipUrl || (activeAssemblySegment.videoGen && activeAssemblySegment.videoGen.url)) ? (
+                    <video
+                      key={activeAssemblySegment.clipUrl || activeAssemblySegment.videoGen.url}
+                      src={activeAssemblySegment.clipUrl || activeAssemblySegment.videoGen.url}
+                      className="w-full h-full object-cover" muted playsInline loop autoPlay
+                    />
+                  ) : activeAssemblySegment && activeAssemblySegment.keyframeImageUrl ? (
+                    <img
+                      src={activeAssemblySegment.keyframeImageUrl} alt="Clip Frame"
+                      className="w-full h-full object-cover transition-transform duration-75"
+                      style={{ transform: `scale(${1 + ((currentTime - activeAssemblySegment.startTime) + (activeAssemblySegment.trimStart || 0)) * 0.015})` }}
+                    />
+                  ) : (
+                    <div className="text-center p-6">
+                      <Video className="w-12 h-12 text-slate-700 mx-auto mb-2 opacity-50" />
+                      <p className="text-xs text-slate-500 uppercase tracking-widest font-bold">No visual yet</p>
+                      <p className="text-[10px] text-slate-600 mt-1">{activeAssemblySegment ? `Scene ${activeAssemblySegment.sceneNumber}` : ''}</p>
+                    </div>
+                  )}
+
+                  <div className="absolute top-4 left-4 right-4 flex justify-between items-start pointer-events-none drop-shadow-md">
+                    <div>
+                      <div className="bg-black/60 backdrop-blur-sm text-white text-[10px] font-mono px-2 py-1 rounded border border-white/10 inline-block mb-1">
+                        {formatTime(currentTime)} / {audio ? formatTime(audio.duration).slice(0, 5) : '--:--'}
+                      </div>
+                    </div>
+                    <div className="text-right flex flex-col items-end space-y-1">
+                      <div className="bg-black/60 backdrop-blur-sm text-cyan-300 text-[10px] font-mono px-2 py-1 rounded border border-cyan-500/20 inline-block">
+                        SCENE {activeAssemblySegment ? activeAssemblySegment.sceneNumber : '–'}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Synced caption — the lyric sung at this time in the song */}
+                  {activeAssemblySegment && activeAssemblySegment.lyrics && (
+                    <div className="absolute bottom-6 left-4 right-4 text-center">
+                      <span className="bg-black/70 backdrop-blur-md text-white text-xs sm:text-sm font-bold px-3 py-1.5 rounded-lg shadow-lg inline-block border border-white/10">
+                        "{activeAssemblySegment.lyrics}"
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Playback controls */}
+                <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg max-w-md mx-auto">
+                  <div className="relative w-full h-2 bg-slate-800 rounded-full cursor-pointer"
+                    onClick={(e) => {
+                      if (!audio) return;
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      seekTo(((e.clientX - rect.left) / rect.width) * audio.duration);
+                    }}>
+                    <div className="absolute top-0 left-0 h-full bg-indigo-500 rounded-full" style={{ width: `${audio ? (currentTime / audio.duration) * 100 : 0}%` }} />
+                    {audio && segments.map(seg => (
+                      <div key={seg.id} className="absolute top-0 w-0.5 h-full bg-slate-950" style={{ left: `${(seg.startTime / audio.duration) * 100}%` }} />
+                    ))}
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <button onClick={() => seekTo(0)} className="text-slate-400 hover:text-white transition">
+                      <FastForward className="w-4 h-4 rotate-180" />
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!audio) return;
+                        if (isPlaying) { pauseAudio(); }
+                        else {
+                          if (currentTime >= audio.duration - 0.2) seekTo(0);
+                          playRangeRef.current = { start: currentTime, end: audio.duration, loop: false };
+                          audioRef.current.play().catch(() => {});
+                          setIsPlaying(true);
+                        }
+                      }}
+                      disabled={!audio}
+                      className="w-12 h-12 rounded-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white flex items-center justify-center shadow-lg shadow-indigo-600/30 transition active:scale-95"
+                    >
+                      {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-1" />}
+                    </button>
+                    <button
+                      onClick={handleExportMP4}
+                      disabled={!audio || !segments.length}
+                      className="bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-cyan-400 px-3 py-2 rounded-lg text-xs font-bold flex items-center space-x-1.5 transition border border-slate-700"
+                    >
+                      <DownloadCloud className="w-4 h-4" /><span>Export MP4</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Scenes in correct order, with what is finished */}
+                <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 space-y-2 shadow-lg">
+                  <h3 className="text-[10px] uppercase font-bold text-slate-400">Scenes in order</h3>
+                  {segments.map((sg) => {
+                    const hasClip = !!(sg.clipUrl || (sg.videoGen && sg.videoGen.url));
+                    return (
+                      <div key={sg.id} className="flex items-center gap-2 bg-slate-950/60 border border-slate-800 rounded-xl px-3 py-2">
+                        <span className="text-[10px] font-black text-slate-300">{sceneTag(sg)}</span>
+                        <span className="text-[11px] font-mono text-cyan-400">{fmtClock(sg.startTime)}–{fmtClock(sg.endTime)}</span>
+                        <span className="text-[10px] text-slate-500 truncate flex-1">"{sg.lyrics}"</span>
+                        {hasClip ? (
+                          <span className="text-[9px] font-bold bg-emerald-950 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-800 flex-shrink-0">CLIP ✓</span>
+                        ) : sg.keyframeImageUrl ? (
+                          <span className="text-[9px] font-bold bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-800 flex-shrink-0">STILL</span>
+                        ) : (
+                          <span className="text-[9px] font-bold bg-slate-800 text-slate-500 px-1.5 py-0.5 rounded border border-slate-700 flex-shrink-0">no visual</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {!segments.length && (
+                    <p className="text-xs text-slate-500 text-center">No scenes yet — start at Step 1 with your song.</p>
+                  )}
+                  <p className="text-[10px] text-slate-600">Captions show in this preview from each scene's lyrics and timing. The exported MP4 does not have captions burned in yet — that is the one gap left.</p>
+                </div>
               </div>
             )}
           </div>
@@ -4328,7 +4705,7 @@ export default function DDCDirectorStudio() {
                 <Plus className="w-3.5 h-3.5" /><span>New</span>
               </button>
             </div>
-            <p className="text-[10px] text-slate-500">Preset actors shared across all your videos. <span className="text-cyan-400 font-bold">Use</span> drops one into the open project as its star.</p>
+            <p className="text-[10px] text-slate-500">Preset actors shared across all your videos. <span className="text-cyan-400 font-bold">Use</span> drops one into the open project — then pick their role right on the row.</p>
             {charForm && (
               <div className="bg-slate-900/80 border border-cyan-900 rounded-2xl p-4 space-y-3">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-cyan-300">{charForm.id ? 'Edit character' : 'New character'}</h3>
@@ -4520,8 +4897,18 @@ export default function DDCDirectorStudio() {
                       </div>
                       <p className="text-[11px] text-slate-400 line-clamp-2 mt-1">{charBlurb(p)}</p>
                       <p className="text-[10px] text-slate-500 truncate mt-0.5">{p.wardrobe || p.mood}</p>
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        <button onClick={() => usePreset(p)} className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1 rounded transition">Use</button>
+                      <div className="mt-2 flex flex-wrap gap-1.5 items-center">
+                        {(() => {
+                          const inCast = cast.find(c => c.presetId === p.id);
+                          return inCast ? (
+                            <span className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-[9px] font-bold bg-emerald-950 text-emerald-300 px-2 py-1 rounded border border-emerald-800">In this video ✓</span>
+                              <RolePicker value={inCast.role} onPick={(r) => setCastRole(inCast.id, r)} />
+                            </span>
+                          ) : (
+                            <button onClick={() => usePreset(p)} className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1 rounded transition">Use</button>
+                          );
+                        })()}
                         <button
                           onClick={() => copyText('handle-' + p.id, '@' + p.handle)}
                           className="text-[10px] font-bold bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-300 px-2.5 py-1 rounded transition flex items-center space-x-1"
@@ -4759,22 +5146,9 @@ export default function DDCDirectorStudio() {
                     className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
                   />
                   <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-                  {castPickerList.map(p => (
-                    <div key={p.id} className="flex items-center gap-2 bg-slate-950/60 border border-slate-800 rounded-xl p-2">
-                      {charThumbUrl(p) ? (
-                        <img src={charThumbUrl(p)} alt={p.name} className="w-10 h-12 object-cover rounded-lg border border-slate-700 flex-shrink-0" />
-                      ) : (
-                        <div className="w-10 h-12 rounded-lg bg-slate-800 border border-slate-700 flex-shrink-0" />
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-bold text-white truncate">{p.name}</p>
-                        <p className="text-[10px] text-slate-500 truncate">{charBlurb(p)}</p>
-                      </div>
-                      <button onClick={() => addPresetToCast(p)} className="text-[10px] font-bold bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-cyan-300 px-2.5 py-1.5 rounded-lg transition flex-shrink-0">Add</button>
-                    </div>
-                  ))}
+                  {castPickerList.map(p => renderCastPickerRow(p))}
                   {castPickerList.length === 0 && (
-                    <p className="text-[10px] text-slate-500">{castSearch ? `No matches for "${castSearch}".` : 'Everyone from your library is already in this cast. Make more on the Characters tab.'}</p>
+                    <p className="text-[10px] text-slate-500">{castSearch ? `No matches for "${castSearch}".` : 'No characters in the library yet. Make more on the Characters tab.'}</p>
                   )}
                   </div>
                 </div>
@@ -4806,11 +5180,9 @@ export default function DDCDirectorStudio() {
                           <button onClick={() => saveCastToLibrary(char)} className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1 rounded flex items-center space-x-1 transition">
                             <Download className="w-3 h-3" /><span>Save to library</span>
                           </button>
-                          {cast.length > 1 && (
-                            <button onClick={() => removeFromCast(char.id)} className="text-[10px] bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-300 px-2 py-1 rounded flex items-center space-x-1 transition">
-                              <Trash2 className="w-3 h-3" /><span>Remove</span>
-                            </button>
-                          )}
+                          <button onClick={() => removeFromCast(char.id)} className="text-[10px] bg-slate-800 hover:bg-red-900/40 text-slate-400 hover:text-red-300 px-2 py-1 rounded flex items-center space-x-1 transition">
+                            <Trash2 className="w-3 h-3" /><span>Remove</span>
+                          </button>
                         </div>
                       </div>
                     </div>
