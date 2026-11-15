@@ -330,7 +330,7 @@ export const BUILTIN_CHARACTER_PRESETS = [
     notes: 'Theme: moonlit rocky shore at the edge of a stormy sea. The mermaid to Caspian\'s sailor — they share the same shore.',
   },
 
-  /* ============================= MEN (22) ============================= */
+  /* ============================= MEN (23) ============================= */
   {
     id: 'builtin-m01', name: '🌊 Captain Elias Barnacle', handle: 'captainBarnacle', category: 'men',
     skinTone: 'rope-burned weather-beaten skin',
@@ -638,6 +638,20 @@ export const BUILTIN_CHARACTER_PRESETS = [
     wardrobe: 'Navy peacoat open over a striped sailor shirt, dark trousers, worn leather boots',
     accessories: 'Brass compass on a chain, coiled rope over one shoulder, a lantern in one hand',
     notes: 'Theme: moonlit rocky shore at the edge of a stormy sea. The sailor to Marina\'s mermaid — they share the same shore.',
+  },
+  {
+    id: 'builtin-m23', name: '💰 Gangster', handle: 'gangsterLead', category: 'men',
+    skinTone: 'rich deep-brown skin',
+    build: 'tall and broad-shouldered, 6\'0", athletic',
+    faceShape: 'handsome, strong jaw, short dark stubble, dark brown eyes',
+    marks: 'gold teeth flashing when he smiles',
+    hair: 'Sharp low fade with a clean lineup',
+    headwear: '',
+    mood: 'confident, cool, unbothered, a little ghetto — street-smart, the one who runs the block',
+    artStyle: 'modern graphic novel comic art, crisp ink linework, cel-shaded dramatic lighting',
+    wardrobe: 'Black leather jacket over a plain white tee, dark jeans, clean white sneakers',
+    accessories: 'Thick gold chain around his neck',
+    notes: 'Theme: concrete jungle — city streets, tower blocks, neon at night. The Lead of the Concrete Jungle music video.',
   },
 
   /* ============================ ANIMALS (10) ========================== */
