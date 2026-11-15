@@ -2119,6 +2119,9 @@ export default function DDCDirectorStudio() {
       const title = defaultTitle(i, n);
       const lines = buckets[i].map((b) => b.text).filter(Boolean).join(' ');
       const p = prev && prev[i];
+      // Lyrics changed by this re-distribution? Stored prompts follow automatically.
+      const newLyrics = (p && p.lyricsLocked && p.lyrics) ? p.lyrics : (lines || (p && p.lyrics) || '(Instrumental / Beat)');
+      const promptPatch = (p && !p.lyricsLocked && newLyrics !== (p.lyrics || '')) ? refreshPromptsForLyricChange(p, p.lyrics || '', newLyrics) : {};
       segs.push({
         id: `scene-${i + 1}`,
         sceneNumber: i + 1,
@@ -2128,7 +2131,7 @@ export default function DDCDirectorStudio() {
         duration: end - start,
         customTimes: custom,
         energyLevel: (p && typeof p.energyLevel === 'number') ? p.energyLevel : defaultEnergy(title),
-        lyrics: (p && p.lyricsLocked && p.lyrics) ? p.lyrics : (lines || (p && p.lyrics) || '(Instrumental / Beat)'),
+        lyrics: newLyrics,
         lyricsLocked: (p && p.lyricsLocked) || false,
         shotType: (p && p.shotType) || (i % 2 === 0 ? 'Lip sync' : 'Motion clip'),
         lipSyncEnabled: (p && typeof p.lipSyncEnabled === 'boolean') ? p.lipSyncEnabled : (i % 2 === 0),
@@ -2139,7 +2142,7 @@ export default function DDCDirectorStudio() {
         lightingMood: (p && p.lightingMood) || 'High-contrast cyan rim lights',
         envFG: (p && p.envFG) || '', envMG: (p && p.envMG) || '',
         envBG: (p && p.envBG) || '', envProps: (p && p.envProps) || '',
-        approvedPrompt: (p && p.approvedPrompt) || '',
+        approvedPrompt: promptPatch.approvedPrompt !== undefined ? promptPatch.approvedPrompt : ((p && p.approvedPrompt) || ''),
         keyframeImageUrl: (p && p.keyframeImageUrl) || null,
         imageName: (p && p.imageName) || '',
         backgroundImageUrl: (p && p.backgroundImageUrl) || null,
@@ -2147,7 +2150,7 @@ export default function DDCDirectorStudio() {
         reviewStatus: (p && p.reviewStatus) || 'pending',
         brollPrompt: (p && p.brollPrompt) || '',
         lipsyncPrompt: (p && p.lipsyncPrompt) || '',
-        videoPrompt: (p && p.videoPrompt) || '',
+        videoPrompt: promptPatch.videoPrompt !== undefined ? promptPatch.videoPrompt : ((p && p.videoPrompt) || ''),
         biblePrompt: (p && p.biblePrompt) || '',
         // Per-scene cast assignment. Missing field (older saves) = all cast;
         // stale ids (removed characters) are dropped.
@@ -2317,6 +2320,27 @@ export default function DDCDirectorStudio() {
     copyTimerRef.current = setTimeout(() => setCopyFeedback(null), 1600);
   };
 
+  // Lyrics → prompts, automatically: when a scene's lyrics change (typed edit,
+  // transcription, or re-distribution), stored prompts must follow. Auto-compiled
+  // prompts (exact match to the old compile) are cleared so the fresh compile —
+  // with the new lyric in the right place — shows. Hand-edited prompts get the
+  // old lyric swapped for the new one. Hand-customized text with no lyric match
+  // is never touched — her words always win.
+  const refreshPromptsForLyricChange = (scene, oldLyric, newLyric) => {
+    const patch = {};
+    const fields = [
+      ['approvedPrompt', compilePromptForScene],
+      ['videoPrompt', compileVideoPrompt],
+    ];
+    fields.forEach(([f, compile]) => {
+      const cur = scene[f];
+      if (typeof cur !== 'string' || !cur) return;
+      if (cur === compile(scene)) { patch[f] = ''; return; }
+      if (oldLyric && cur.includes(oldLyric)) patch[f] = cur.split(oldLyric).join(newLyric);
+      if (typeof patch[f] === 'string' && patch[f].includes('{{LYRIC}}')) patch[f] = patch[f].split('{{LYRIC}}').join(newLyric);
+    });
+    return patch;
+  };
   const updateScene = (index, patch) => {
     setSegments(prev => {
       const next = [...prev];
@@ -2868,21 +2892,12 @@ export default function DDCDirectorStudio() {
         onChange={(e) => {
           const newLyric = e.target.value;
           const oldLyric = s.lyrics || '';
-          if (oldLyric && oldLyric !== newLyric) {
-            // Upgrade stored prompts that baked the old lyric verbatim: swap it
-            // for the self-updating {{LYRIC}} token. Prompts she hand-customized
-            // (no verbatim match) are left untouched — her words always win.
-            const patch = { lyrics: newLyric, lyricsLocked: true };
-            ['videoPrompt', 'approvedPrompt'].forEach((f) => {
-              if (typeof s[f] === 'string' && s[f].includes(oldLyric)) {
-                patch[f] = s[f].split(oldLyric).join(newLyric);
-              }
-              // Legacy token from the old format: expand it to the new lyric too.
-              if (typeof patch[f] === 'string' && patch[f].includes('{{LYRIC}}')) {
-                patch[f] = patch[f].split('{{LYRIC}}').join(newLyric);
-              }
-            });
-            updateScene(index, patch);
+          if (oldLyric !== newLyric) {
+            // Stored prompts follow the lyric automatically (see
+            // refreshPromptsForLyricChange): auto-compiled ones clear so the
+            // fresh compile shows the new lyric; hand-edited ones get the old
+            // lyric swapped for the new one. Her custom words always win.
+            updateScene(index, { lyrics: newLyric, lyricsLocked: true, ...refreshPromptsForLyricChange(s, oldLyric, newLyric) });
           } else {
             updateScene(index, { lyrics: newLyric, lyricsLocked: true });
           }
@@ -3001,7 +3016,10 @@ export default function DDCDirectorStudio() {
         const next = prev.map(scene => {
           const hits = out.segments.filter(s => s.start < scene.endTime && s.end > scene.startTime);
           if (scene.lyricsLocked) return scene;
-          if (hits.length) return { ...scene, lyrics: hits.map(h => h.text).join(' ').trim() };
+          if (hits.length) {
+            const newLyric = hits.map(h => h.text).join(' ').trim();
+            return { ...scene, lyrics: newLyric, ...refreshPromptsForLyricChange(scene, scene.lyrics || '', newLyric) };
+          }
           return scene;
         });
         persist(project, newLyrics, next);

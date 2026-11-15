@@ -640,7 +640,7 @@ export const BUILTIN_CHARACTER_PRESETS = [
     notes: 'Theme: moonlit rocky shore at the edge of a stormy sea. The sailor to Marina\'s mermaid — they share the same shore.',
   },
   {
-    id: 'builtin-m23', name: '💰 Gangster', handle: 'gangsterLead', category: 'men',
+    id: 'builtin-m23', name: '💰 Malik', handle: 'gangsterLead', category: 'men',
     skinTone: 'sun-kissed tan light skin',
     build: 'tall and broad-shouldered, 6\'3", athletic-skinny build',
     faceShape: 'handsome, strong jaw, sexy smile, dark brown eyes',
