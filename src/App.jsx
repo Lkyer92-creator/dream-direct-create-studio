@@ -1049,7 +1049,7 @@ function loadLooks() {
 }
 
 export default function DDCDirectorStudio() {
-  const [activeTab, setActiveTab] = useState('timeline');
+  const [activeTab, setActiveTab] = useState('projects');
 
   const bootRef = useRef(null);
   if (bootRef.current === null) bootRef.current = initializeProjects();
@@ -4888,11 +4888,11 @@ export default function DDCDirectorStudio() {
       {/* MOBILE BOTTOM NAVIGATION — 8 tabs, scrollable on phones */}
       <nav className="fixed bottom-0 left-0 right-0 z-40 bg-[#0a0d14]/95 backdrop-blur-lg border-t border-slate-800 px-2 py-2 flex items-center gap-0.5 overflow-x-auto">
         {[
-          { key: 'director', label: 'Director', Icon: Wand2 },
           { key: 'projects', label: 'Projects', Icon: Layers },
+          { key: 'characters', label: 'Characters', Icon: Users },
+          { key: 'director', label: 'Director', Icon: Wand2 },
           { key: 'timeline', label: 'Timeline', Icon: Sliders },
           { key: 'scenes', label: 'Scenes', Icon: Film },
-          { key: 'characters', label: 'Characters', Icon: Users },
           { key: 'audio', label: 'Audio', Icon: AudioLines },
           { key: 'looks', label: 'Looks', Icon: Palette },
           { key: 'assets', label: 'Assets', Icon: Sparkles },
